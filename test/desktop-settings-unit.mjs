@@ -137,6 +137,31 @@ try {
   assert.equal(unsafeRollbackStarts, 1, 'failed credential restoration must not reconnect inconsistent settings');
   assert.deepEqual(readGuiConfig(), { port: 3333, token: 'local-only-token', tunnelId: '' });
 
+  // Two IPC saves can overlap while the first is waiting for a reconnect.
+  // An older rollback must finish before the next save reads its baseline.
+  {
+    const entered = Promise.withResolvers();
+    const release = Promise.withResolvers();
+    const restartPorts = [];
+    const actions = {
+      ...runtimeActions,
+      restartDesktop: async () => {
+        restartPorts.push(readGuiConfig().port);
+        if (restartPorts.length === 1) { entered.resolve(); return release.promise; }
+        return { serverRunning: true };
+      }
+    };
+    const first = assert.rejects(saveDesktopSettings({ port: 4444, tunnelId: 'tunnel_olderfixture' }, actions), /first fixture restart failed/);
+    await entered.promise;
+    const second = saveDesktopSettings({ port: 5555 }, actions);
+    release.resolve({ serverRunning: false, error: 'first fixture restart failed' });
+    await first;
+    assert.equal((await second).ok, true);
+    assert.deepEqual(restartPorts, [4444, 3333, 5555], 'rollback must finish before applying the next save');
+    assert.deepEqual(readGuiConfig(), { port: 5555, token: 'local-only-token', tunnelId: '' },
+      'the successful patch must not inherit transient fields or be overwritten by an earlier rollback');
+  }
+
   // A damaged encrypted record must be replaceable without decrypting it, and
   // an unrelated local restart failure must restore the original encrypted bytes.
   {

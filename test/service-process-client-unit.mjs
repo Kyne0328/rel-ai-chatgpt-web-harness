@@ -231,6 +231,46 @@ await delayedStop;
 await client.dispose({ stop: false });
 assert.equal(child.killed, true);
 
+// A request's promise callback can resume after this utility exits or after a
+// newer stop request has retired the same utility's listener.
+for (const transition of ['exit', 'stop']) {
+  const sent = Promise.withResolvers();
+  const children = [];
+  let held = false;
+  class ControlledUtility extends FakeUtilityProcess {
+    postMessage(message) {
+      if (!held && message.type === 'request' && message.method === 'start') {
+        held = true; this.sent.push(message); sent.resolve(message); return;
+      }
+      super.postMessage(message);
+    }
+  }
+  const service = createServiceProcessClient({ modulePath: '/fixture/service.js', utilityProcess: {
+    fork() { const next = new ControlledUtility(); children.push(next); return next; }
+  } });
+  const starting = service.start();
+  const request = await sent.promise;
+  const old = children[0];
+  if (transition === 'stop') await service.stop();
+  old.emit('message', { type: 'response', id: request.id, ok: true, result: { ok: true, port: 4111 } });
+  if (transition === 'exit') old.emit('exit', 1);
+  await assert.rejects(starting, /superseded|no longer current/);
+  assert.equal(service.port(), 0, 'an old start receipt is not a current listener');
+  await service.getLocalUsage('fixture');
+  assert.equal(service.isListening(), false, 'a utility used for diagnostics alone has not started a listener');
+  assert.equal(children.length, transition === 'exit' ? 2 : 1);
+  assert.equal((await service.start()).port, 4567, 'a fresh explicit start may publish its own port');
+  assert.equal(service.isListening(), true);
+  const events = [];
+  service.activitySource.onToolActivity(e => events.push(e.snapshot?.state));
+  children.at(-1).emit('message', { type: 'activity', event: { phase: 'snapshot',
+    snapshot: { state: 'working', activeTaskCount: 1, tasks: [{ id: 'fixture-task' }] } } });
+  await service.dispose({ stop: false });
+  await service.dispose({ stop: false });
+  assert.equal(service.activitySource.getToolActivity().activeTaskCount, 0);
+  assert.deepEqual(events, ['working', 'idle'], 'clearing the owned utility must retire its published activity exactly once');
+}
+
 class DeferredSpawnUtilityProcess extends EventEmitter {
   constructor() {
     super();

@@ -8,6 +8,9 @@
 export const DASHBOARD_DATA_URL = '/api/dashboard/v10?limit=100';
 const CACHE_RETENTION_MS = 60_000;
 const responseCache = new Map();
+// Track only unsettled cacheable reads. An older response still belongs to its caller,
+// but it must not overwrite a newer request's cached result.
+const pendingCacheWrites = new Map();
 let _cacheGeneration = 0;
 let _dashboardReloadPromise = null;
 
@@ -94,20 +97,27 @@ function requestHeaders(fetchOpts) {
   return headers;
 }
 
-async function parseJsonResponse(res) {
+async function parseJsonResponse(res, method) {
   const text = await res.text();
+  let data;
   try {
-    return JSON.parse(text);
+    data = JSON.parse(text);
   } catch (error) {
-    if (window.localStorage?.getItem('relai_debug') === '1') console.error(error);
-    return structuredRequestError(text || `Dashboard returned HTTP ${res.status}.`, res.status);
+    if (globalThis.window?.localStorage?.getItem('relai_debug') === '1') console.error(error);
   }
+  // After dispatch, a malformed success or gateway response cannot say whether
+  // a change committed. 4xx responses still carry their normal rejection and
+  // authorization recovery semantics, even if their body is unreadable.
+  if (isMutation(method) && (res.ok || res.status >= 500)
+      && (typeof data?.ok !== 'boolean' || (!res.ok && data.ok))) return unconfirmedAction();
+  if (data !== null && typeof data === 'object') return data;
+  return structuredRequestError(text || `Dashboard returned HTTP ${res.status}.`, res.status);
 }
 
 function normalizeResponseData(res, data) {
   data.httpStatus = res.status;
   if (!Object.hasOwn(data, 'status')) data.status = res.status;
-  if (!res.ok && data.ok !== true) data.ok = false;
+  if (!res.ok) data.ok = false;
   if (res.status === 401) {
     data.error = data.error || 'Dashboard authorization expired. Reopening the dashboard…';
     recoverDashboardAuthorization();
@@ -136,16 +146,20 @@ function structuredRequestError(message, status = 0) {
   };
 }
 
+function isMutation(method = 'GET') {
+  return !['GET', 'HEAD'].includes(String(method).toUpperCase());
+}
+
+function unconfirmedAction() {
+  return {
+    ok: false, outcomeUnknown: true, errorCode: 'dashboard_action_unconfirmed',
+    title: 'Action not confirmed',
+    error: 'No confirmation received. The action may have completed. Check the refreshed state before trying again.'
+  };
+}
+
 function requestError(err, timeoutMs, method = 'GET') {
-  // The browser losing a response does not prove a state-changing request was
-  // rolled back. Never invite a blind retry of a potentially completed action.
-  if (!['GET', 'HEAD'].includes(String(method).toUpperCase())) {
-    return {
-      ok: false, outcomeUnknown: true, errorCode: 'dashboard_action_unconfirmed',
-      title: 'Action not confirmed',
-      error: 'No confirmation received. The action may have completed. Check the refreshed state before trying again.'
-    };
-  }
+  if (isMutation(method)) return unconfirmedAction();
   const isAbort = err?.name === 'AbortError';
   return structuredRequestError(isAbort ? `Request timed out after ${Math.round(timeoutMs / 1000)} seconds.` : String(err));
 }
@@ -160,6 +174,8 @@ export async function fetchJson(url, opts = {}) {
   const cached = cachedValue(cacheKey, cacheTtlMs);
   if (cached) return cached;
   const cacheGeneration = _cacheGeneration;
+  const cacheRequest = cacheKey ? Symbol() : null;
+  if (cacheKey) pendingCacheWrites.set(cacheKey, cacheRequest);
 
   const timeoutMs = timeoutFor(timeout);
   const ctrl = new AbortController();
@@ -172,8 +188,9 @@ export async function fetchJson(url, opts = {}) {
       signal: ctrl.signal,
       headers: requestHeaders(fetchOpts)
     });
-    const data = normalizeResponseData(res, await parseJsonResponse(res));
-    if (cacheKey && res.ok && data?.ok !== false && cacheGeneration === _cacheGeneration) {
+    const data = normalizeResponseData(res, await parseJsonResponse(res, fetchOpts.method));
+    if (data.outcomeUnknown) requestDashboardRefresh();
+    if (cacheKey && res.ok && data?.ok !== false && cacheGeneration === _cacheGeneration && pendingCacheWrites.get(cacheKey) === cacheRequest) {
       cacheResponse(cacheKey, data);
     }
     return data;
@@ -182,6 +199,7 @@ export async function fetchJson(url, opts = {}) {
     if (result.outcomeUnknown) requestDashboardRefresh();
     return result;
   } finally {
+    if (cacheKey && pendingCacheWrites.get(cacheKey) === cacheRequest) pendingCacheWrites.delete(cacheKey);
     clearRequestTimeout();
   }
 }

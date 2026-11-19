@@ -130,6 +130,7 @@ function createAppUpdater(options = {}) {
   }
 
   function stop() {
+    installDeferred = false;
     if (autoCheckTimer) clearTimer(autoCheckTimer);
     if (releaseDiscoveryTimer) clearTimer(releaseDiscoveryTimer);
     autoCheckTimer = null;
@@ -233,6 +234,7 @@ function createAppUpdater(options = {}) {
   async function installUpdate(options = {}) {
     if (installAttempt) return failure(codes.busy, updateBusyMessage(), false);
     if (!support.supported) return failure(codes.unsupported, support.reason, false);
+    if (!started) return { ok: true, skipped: true, status: snapshot() };
     if (retryingOperation) return failure(codes.busy, updateBusyMessage(), false);
     if (status.state !== 'downloaded' || status.integrityVerified !== true) {
       const guidance = platform === 'darwin'
@@ -300,13 +302,28 @@ function createAppUpdater(options = {}) {
   }
 
   async function openMacUpdate() {
+    const generation = lifecycleGeneration;
+    const operation = beginUpdateOperation(generation);
+    operation.openingMacInstaller = true;
+    let result;
+    let handedOff = false;
     try {
+      onStatusChange(snapshot());
+      if (!isCurrentGeneration(generation)) return result = { ok: true, skipped: true };
       await macUpdater.openDownloaded(status.availableVersion);
+      if (!isCurrentGeneration(generation)) return result = { ok: true, skipped: true };
       log(`Opened verified macOS update ${status.availableVersion || ''} for manual installation.`);
-      await onMacInstallerOpened();
-      return { ok: true, opened: true, status: snapshot() };
+      handedOff = true;
+      await onMacInstallerOpened(); // This callback intentionally stops the updater during shutdown.
+      return result = { ok: true, opened: true };
     } catch (error) {
-      return handleError(error);
+      if (!isCurrentGeneration(generation)) {
+        return result = handedOff ? failure(codes.failed, updateRecoveryMessage(error), true) : { ok: true, skipped: true };
+      }
+      return result = handleError(error);
+    } finally {
+      finishUpdateOperation(operation);
+      if (result) result.status = snapshot();
     }
   }
 
@@ -437,7 +454,7 @@ function createAppUpdater(options = {}) {
     operation.settle();
     if (retryingOperation !== operation) return;
     retryingOperation = null;
-    if (started && lifecycleGeneration !== operation.generation) onStatusChange(snapshot());
+    if (started && (lifecycleGeneration !== operation.generation || operation.openingMacInstaller)) onStatusChange(snapshot());
   }
 
   async function runWithRetries(label, action, generation) {
@@ -511,7 +528,7 @@ function createAppUpdater(options = {}) {
         ...status, state: 'error', errorCode: codes.busy, error: updateBusyMessage(),
         progress: null, integrityVerified: false, canCheck: false, canDownload: false, canInstall: false
       }
-      : status;
+      : retryingOperation?.openingMacInstaller ? normalizeStatus({ ...status, state: 'installing' }) : status;
     const installBlockedReason = current.canInstall
       ? taskActivityBlockReason(getTaskActivity(), 'installing the update')
       : '';
@@ -541,6 +558,7 @@ function createAppUpdater(options = {}) {
 
   async function deferInstallUntilIdle() {
     if (!support.supported) return failure(codes.unsupported, support.reason, false);
+    if (!started) return { ok: true, skipped: true, status: snapshot() };
     if (retryingOperation) return failure(codes.busy, updateBusyMessage(), false);
     if (status.state !== 'downloaded' || status.integrityVerified !== true) {
       return failure(codes.busy, 'Download and verify the update before scheduling installation.', false);
@@ -554,7 +572,7 @@ function createAppUpdater(options = {}) {
   }
 
   async function resumeDeferredInstall() {
-    if (!installDeferred || status.state !== 'downloaded' || status.integrityVerified !== true) {
+    if (!started || !installDeferred || status.state !== 'downloaded' || status.integrityVerified !== true) {
       return { ok: true, skipped: true, status: snapshot() };
     }
     if (retryingOperation) return failure(codes.busy, updateBusyMessage(), false);

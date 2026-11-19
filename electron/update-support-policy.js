@@ -112,6 +112,7 @@ function createUpdateSupportPolicy(options = {}) {
     stopped = false;
     started = true;
     emit(status);
+    schedule();
     void refresh();
     return snapshot();
   }
@@ -180,21 +181,45 @@ function createUpdateSupportPolicy(options = {}) {
   function schedule() {
     if (!started) return;
     if (timer) clearTimer(timer);
-    timer = setTimer(() => {
+    const at = Number(now());
+    const deadlines = status.state === 'unavailable' ? [] : [
+      Date.parse(status.policyExpiresAt),
+      ...(status.state === 'deprecated' ? [Date.parse(status.enforceAfter)] : [])
+    ];
+    const delay = Math.min(SUPPORT_POLICY_CHECK_INTERVAL_MS,
+      ...deadlines.filter(time => Number.isFinite(time) && time > at).map(time => time - at));
+    const owned = setTimer(() => {
+      if (!started || timer !== owned) return;
       timer = null;
+      const next = effective(status);
+      if (next.state !== status.state) emit(next);
+      // Keep one owned clock even if the request never settles.
+      schedule();
       void refresh();
-    }, SUPPORT_POLICY_CHECK_INTERVAL_MS);
+    }, delay);
+    timer = owned;
     timer?.unref?.();
   }
 
+  function effective(value) {
+    if (value.state === 'unavailable') return value;
+    const time = Number(now());
+    const enforcement = Date.parse(value.enforceAfter);
+    if (time < Date.parse(value.policyExpiresAt)
+      && !(value.state === 'deprecated' && time >= enforcement)
+      && !(value.state === 'required' && time < enforcement)) return value;
+    const assessment = assessSupportPolicy(app.getVersion(), { ...value, schemaVersion: SUPPORT_POLICY_SCHEMA_VERSION }, time);
+    return { ...value, ...withSource(assessment, value.source) };
+  }
+
   function emit(next) {
-    status = normalizePolicyStatus(next, app.getVersion());
+    status = effective(normalizePolicyStatus(next, app.getVersion()));
     onStatusChange(snapshot());
   }
 
   function snapshot() {
     return {
-      ...status,
+      ...effective(status),
       emergencyBlockedVersions: [...(status.emergencyBlockedVersions || [])]
     };
   }

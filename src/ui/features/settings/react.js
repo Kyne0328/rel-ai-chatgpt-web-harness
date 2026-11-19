@@ -15,6 +15,7 @@ import { readDeveloperOptionsUnlocked, unlockDeveloperOptions } from '../../deve
 import { chatGptFirstPrompt, chatGptGuideSteps, CHATGPT_CONNECTOR_CREATE_URL } from './connection-guidance.js';
 import { restartConnection } from './connection-recovery.js';
 import { supportPolicyView } from './desktop-update-policy.js';
+import { clearDashboardAnalytics } from '../usage/data.js';
 
 const h = React.createElement;
 const RELEASES_URL = 'https://github.com/Kyne0328/rel-ai-chatgpt-web-harness/releases';
@@ -209,7 +210,13 @@ function GoalModeAccount({ browser }) {
   const applyStatus = useCallback(next => {
     if (Array.isArray(next?.connections)) {
       setStatus(next);
-      setSelectedTunnelId(current => current || next.connections.find(item => item.enabled !== false)?.tunnelId || '');
+      setSelectedTunnelId(current => {
+        if (current) return current;
+        let preferred = '';
+        try { preferred = window.localStorage.getItem('goalModeTunnelId'); } catch { /* Storage is optional. */ }
+        const available = next.connections.filter(item => item.enabled !== false);
+        return available.find(item => item.tunnelId === preferred)?.tunnelId || available[0]?.tunnelId || '';
+      });
     } else {
       setStatus(current => Array.isArray(current?.connections) && next?.tunnelId
         ? { ...current, connections: current.connections.map(item => item.tunnelId === next.tunnelId ? next : item) }
@@ -299,7 +306,13 @@ function GoalModeAccount({ browser }) {
       h('div', { className: 'connection-goal-account-row' },
         Array.isArray(connections) && connections.length ? h('label', { className: 'connection-goal-select' }, 'Connection',
           h('select', { value: selectedTunnelId, disabled: Boolean(busy), 'aria-label': 'ChatGPT Goal Mode connection',
-            onChange: event => { requestVersion.current++; setError(''); setSelectedTunnelId(event.target.value); } },
+            onChange: event => {
+              const tunnelId = event.target.value;
+              requestVersion.current++;
+              setError('');
+              setSelectedTunnelId(tunnelId);
+              try { window.localStorage.setItem('goalModeTunnelId', tunnelId); } catch { /* Still selected for this visit. */ }
+            } },
           selectedTunnelId && !selected ? h('option', { value: selectedTunnelId }, 'Connection unavailable') : null,
           connections.map(item => h('option', { key: item.tunnelId, value: item.tunnelId }, item.label || item.tunnelId)))) : null,
         h('div', { className: 'connection-goal-copy' },
@@ -415,6 +428,32 @@ function DesktopConnectionSettings({ expanded = false, primaryTunnel = null }) {
   const [tunnelBusy, setTunnelBusy] = useState(false);
   const saveInFlightRef = useRef(false);
   const desktop = window.relaiDesktop;
+  const projectionVersion = useRef(0);
+  const liveStatusVersion = useRef(0);
+  const [projectionState, setProjectionState] = useState('ready');
+  useEffect(() => {
+    const version = projectionVersion;
+    return () => { version.current++; };
+  }, [desktop]);
+  const refreshTunnelProjection = async () => {
+    const version = ++projectionVersion.current;
+    const statusAtStart = liveStatusVersion.current;
+    setProjectionState('loading');
+    try {
+      const settings = await desktop.getSettings();
+      if (version !== projectionVersion.current) return;
+      if (!settings || settings.ok === false) throw new Error('Settings unavailable');
+      setForm(current => ({ ...current, tunnelId: settings.tunnelId || '', tunnelLabel: settings.tunnelLabel || 'Connection 1',
+        tunnelApiKeyConfigured: settings.tunnelApiKeyConfigured === true,
+        tunnelErrorCode: settings.tunnelErrorCode || '', tunnelError: settings.tunnelError || '',
+        additionalTunnels: settings.additionalTunnels || [],
+        ...(liveStatusVersion.current === statusAtStart ? { additionalTunnelError: settings.additionalTunnelError || '',
+          additionalTunnelStatuses: settings.additionalTunnelStatuses || [] } : {}) }));
+      setProjectionState('ready');
+    } catch {
+      if (version === projectionVersion.current) setProjectionState('error');
+    }
+  };
 
   useEffect(() => {
     if (!desktop?.getSettings || !desktop?.saveSettings) return undefined;
@@ -455,6 +494,7 @@ function DesktopConnectionSettings({ expanded = false, primaryTunnel = null }) {
     if (!desktop?.onStatus) return undefined;
     return desktop.onStatus(status => {
       if (!Array.isArray(status?.additionalTunnelStatuses)) return;
+      liveStatusVersion.current++;
       setForm(current => current && !current.loadError
         ? { ...current, additionalTunnelStatuses: status.additionalTunnelStatuses,
           additionalTunnelError: String(status.additionalTunnelError || '') }
@@ -536,21 +576,22 @@ function DesktopConnectionSettings({ expanded = false, primaryTunnel = null }) {
     h('summary', { className: 'connector-details-summary' }, h('span', null, h('strong', null, 'Connection settings'), h('small', null, 'Manage tunnels and the local port'))),
     h('div', { className: 'card-body settings-panel-body' },
       form.additionalTunnelError ? h('p', { role: 'alert', className: 'settings-help' }, form.additionalTunnelError) : null,
+      projectionState === 'error' ? h('div', { className: 'settings-help', role: 'status' },
+        'Your tunnel change was saved, but the connection list could not be refreshed. ',
+        h('button', { className: 'secondary compact-button', type: 'button', onClick: refreshTunnelProjection }, 'Reload connection list')
+      ) : null,
       h(TunnelConnections, {
         primary: form.tunnelId ? { ...primaryTunnel, tunnelId: form.tunnelId, label: form.tunnelLabel, error: credentialError, apiKeyConfigured: form.tunnelApiKeyConfigured } : null,
         connections: form.additionalTunnels,
         statuses: form.additionalTunnelStatuses,
         desktop,
-        disabled: saveState === 'saving',
+        disabled: saveState === 'saving' || projectionState !== 'ready',
         onBusyChange: setTunnelBusy,
-        onChange: async ({ connections, statuses }) => {
+        onChange: ({ connections, statuses }) => {
           setForm(current => ({ ...current, additionalTunnels: connections, additionalTunnelStatuses: statuses }));
-          const settings = await desktop.getSettings();
-          setForm(current => ({ ...current, tunnelId: settings.tunnelId || '', tunnelLabel: settings.tunnelLabel || 'Connection 1',
-            tunnelApiKeyConfigured: settings.tunnelApiKeyConfigured === true,
-            tunnelErrorCode: settings.tunnelErrorCode || '', tunnelError: settings.tunnelError || '',
-            additionalTunnels: settings.additionalTunnels || [], additionalTunnelError: settings.additionalTunnelError || '',
-            additionalTunnelStatuses: settings.additionalTunnelStatuses || [] }));
+          // The native mutation already committed. A delayed or failed read
+          // must not retain the submitted key or make Save appear to have failed.
+          void refreshTunnelProjection();
         }
       }),
       h('details', { className: 'settings-advanced connection-advanced-settings' },
@@ -639,7 +680,7 @@ function TunnelConnections({ primary = null, connections = [], statuses = [], de
         apiKey: draft.apiKey,
         enabled: draft.enabled
       });
-      if (!result || (result.ok === false && result.saved !== true)) throw new Error(result?.error || 'The tunnel could not be saved.');
+      if (!result || (result.ok !== true && result.saved !== true)) throw new Error(result?.error || 'The tunnel could not be saved.');
       await onChange?.({
         connections: Array.isArray(result?.connections) ? result.connections : connections,
         statuses: Array.isArray(result?.statuses) ? result.statuses : statuses
@@ -649,14 +690,14 @@ function TunnelConnections({ primary = null, connections = [], statuses = [], de
       if (result?.ok === false) {
         const savedDraft = { ...draft, originalTunnelId: result.connection?.tunnelId || draft.tunnelId, apiKey: '', apiKeyConfigured: true };
         resetDraft(savedDraft);
-        toast(result?.error || result?.status?.error || 'The tunnel was saved, but it could not connect.', { variant: 'error' });
+        toast(draft.apiKey ? 'The tunnel was saved, but it could not connect. Check its connection status.' : result?.error || result?.status?.error || 'The tunnel was saved, but it could not connect.', { variant: 'error' });
       } else {
         toast(draft.originalTunnelId ? 'ChatGPT tunnel saved.' : 'ChatGPT tunnel added.', { variant: 'success' });
         setOpen(false);
         resetDraft();
       }
     } catch (error) {
-      toast(messageOf(error), { variant: 'error' });
+      toast(draft.apiKey ? 'Tunnel settings could not be saved. Check the tunnel ID and runtime API key before trying again.' : messageOf(error), { variant: 'error' });
     } finally {
       busyRef.current = false;
       setBusy('');
@@ -676,14 +717,15 @@ function TunnelConnections({ primary = null, connections = [], statuses = [], de
     if (!confirmed) { busyRef.current = false; setBusy(''); return; }
     try {
       const result = await desktop.removeTunnel(connection.tunnelId);
+      if (!result || (result.ok !== true && result.removed !== true)) throw new Error(result?.error || 'The tunnel could not be removed.');
       await onChange?.({
         connections: Array.isArray(result?.connections) ? result.connections : [],
         statuses: Array.isArray(result?.statuses) ? result.statuses : []
       });
-      if (result?.ok === false) throw new Error(result.error || 'The tunnel could not be removed.');
       if (draft.originalTunnelId === connection.tunnelId) { setOpen(false); resetDraft(); }
       requestDashboardRefresh();
-      toast('ChatGPT tunnel removed.', { variant: 'success' });
+      if (result.ok === false) toast('Tunnel settings were removed, but runtime cleanup could not be confirmed. Check the connection status.', { variant: 'warn' });
+      else toast('ChatGPT tunnel removed.', { variant: 'success' });
     } catch (error) {
       toast(messageOf(error), { variant: 'error' });
     } finally {
@@ -1694,7 +1736,7 @@ function LocalDataSettings() {
     });
     if (!confirmed) return;
     setBusy('analytics');
-    const result = await postJson('/api/diagnostics/reset', { target: 'analytics', confirm: true }).catch(actionError => ({ ok: false, error: messageOf(actionError) }));
+    const result = await clearDashboardAnalytics(bridge, () => postJson('/api/diagnostics/reset', { target: 'analytics', confirm: true })).catch(actionError => ({ ok: false, error: messageOf(actionError) }));
     setBusy('');
     if (!result?.ok) { toast(result?.error || 'Local analytics could not be cleared.', { variant: result?.outcomeUnknown ? 'warn' : 'error' }); return; }
     toast(result.message || 'Local analytics cleared.', { variant: 'success' }); requestDashboardRefresh(); await load();

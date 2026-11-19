@@ -441,10 +441,10 @@ async function exerciseProcessOutputFollow(newestFirst) {
   };
   vm.runInNewContext(processesSource.replace(/^import .*;\n/gm, '').replace(/^export /gm, '')
     + '\nglobalThis.renderOutput = OutputBlock;', context);
-  const render = totalBytes => {
+  const render = (totalBytes, retainedFromOffset = 0) => {
     props = {
       processId: 'follow-process', stream: 'stdout', value: 'B'.repeat(10), active: true,
-      meta: { tailStartOffset: 10, totalBytes, retainedFromOffset: 0, droppedBytes: 0, tailTruncated: true, retentionTruncated: false }
+      meta: { tailStartOffset: 10, totalBytes, retainedFromOffset, droppedBytes: 0, tailTruncated: true, retentionTruncated: false }
     };
     cursor = 0;
     tree = context.renderOutput(props);
@@ -461,6 +461,43 @@ async function exerciseProcessOutputFollow(newestFirst) {
   render(20);
   render(30);
   assert.equal(requests.length, 2);
+
+  if (newestFirst === 'unavailable') {
+    const body = () => flatten(tree).find(node => node?.type === 'pre').children.join('');
+    const retry = () => flatten(tree).find(node => node?.type === 'button' && node.children.includes('Retry output'));
+    const original = 'A'.repeat(10) + 'B'.repeat(10);
+    // A retained log file can disappear after metadata advertises more bytes.
+    requests[1].resolve({ ok: true, range: { offset: 0, nextOffset: 0, totalBytes: 30, retainedFromOffset: 0, text: '' } });
+    await drain();
+    render(30); render(30);
+    assert.equal(requests.length, 2, 'no progress must not trigger another read at the same cursor');
+    assert.equal(body(), original);
+    assert.ok(retry(), 'a stopped follower must expose a user-controlled recovery action');
+    assert.ok(!flatten(tree).includes('Full retained history loaded · following new output'));
+    retry().props.onClick();
+    render(30);
+    assert.equal(requests.length, 3);
+    requests[2].resolve({ ok: true, range: { offset: 10, nextOffset: 30, text: 'B'.repeat(10) + 'C'.repeat(10) } });
+    await drain(); render(30);
+    assert.equal(body(), original, 'rewound responses must not append bytes twice');
+    assert.equal(requests.length, 3);
+
+    render(30, 2);
+    assert.equal(requests.length, 4, 'changed retention may make output available even with unchanged total');
+    requests[3].resolve({ ok: false, error: 'Request timed out.' });
+    await drain(); render(30, 2); render(30, 2);
+    assert.equal(requests.length, 4, 'a timeout must wait for a retry or new metadata');
+    assert.ok(retry());
+    render(40, 2);
+    assert.equal(requests.length, 5);
+    requests[4].resolve({ ok: true, range: { offset: 20, nextOffset: 40, text: 'C'.repeat(20) } });
+    await drain(); render(40, 2);
+    assert.equal(body(), original + 'C'.repeat(20), 'metadata recovery appends exactly the unread bytes');
+    assert.equal(retry(), undefined);
+    assert.equal(requests.length, 5);
+    slots.forEach(slot => slot?.cleanup?.());
+    return;
+  }
   render(40); // New live bytes arrive while the prior range request is unresolved.
   assert.equal(requests.length, 3, 'new output must retain a pending follower when the previous effect is invalidated');
   const older = () => requests[1].resolve({ ok: true, range: { offset: 20, nextOffset: 30, text: 'C'.repeat(10) } });
@@ -480,6 +517,7 @@ async function exerciseProcessOutputFollow(newestFirst) {
 }
 await exerciseProcessOutputFollow(false);
 await exerciseProcessOutputFollow(true);
+await exerciseProcessOutputFollow('unavailable');
 
 const dashboardDataSource = fs.readFileSync(path.join(root, 'src/core/dashboard-data.ts'), 'utf8');
 const dashboardRuntimeSource = fs.readFileSync(path.join(root, 'src/core/dashboard-runtime.ts'), 'utf8');
@@ -546,10 +584,13 @@ const scopedProcesses = [
 assert.deepEqual(taskProcessGroups(scopedProcesses, 'task-a', 'app').owned.map(p => p.processId), ['owned', 'legacy']);
 assert.deepEqual(taskProcessGroups(scopedProcesses, 'task-a', 'app').other.map(p => p.processId), ['other']);
 assert.equal(taskProcessGroups([{ processId: 'unassigned' }]).owned.length, 0);
-for (const [validation, expected] of [['passed', 'Passed'], ['failed', 'Failed'], ['not_run', 'Not run'], ['unavailable', 'Unavailable'], ['', 'Not recorded']]) {
+for (const [validation, expected] of [['passed', 'Passed'], ['failed', 'Failed'], ['not_run', 'Not run'], ['unavailable', 'Unavailable'],
+  ['stale', 'Out of date; recheck'], ['not_required', 'Not required'], ['cancelled', 'Cancelled'], ['', 'Not recorded']]) {
   assert.equal(taskValidationView({ validation }).statusLabel, expected);
 }
 assert.equal(taskValidationView({ status: 'validating' }).statusLabel, 'Checking');
+assert.equal(taskValidationView({ status: 'validation_failed', validation: 'stale' }).statusLabel, 'Out of date; recheck');
+assert.equal(taskValidationView({ status: 'validation_failed' }).statusLabel, 'Failed');
 assert.equal(taskValidationView({ validation: 'passed', events: [{ tool: 'relai_read' }, { tool: 'relai_validate' }] }).events.length, 1);
 
 console.log('Dashboard work-session, process, accessibility, and missing-field observability contracts passed.');

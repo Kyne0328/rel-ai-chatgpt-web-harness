@@ -23,6 +23,7 @@ function createServiceProcessClient(options = {}) {
   let cancelSpawn = null;
   let requestSequence = 0;
   let activePort = 0;
+  let stopGeneration = 0;
   let context = {};
   let currentActivity = emptyActivity();
   const pending = new Map();
@@ -44,14 +45,21 @@ function createServiceProcessClient(options = {}) {
   };
 
   async function start(payload = {}) {
-    await ensureChild();
+    const generation = stopGeneration;
+    const owned = await ensureChild();
+    const assertCurrent = () => {
+      if (owned !== child || generation !== stopGeneration) throw new Error('Rel.AI service startup was superseded by a stop or utility replacement.');
+    };
+    assertCurrent();
     const result = await request('start', payload, startTimeoutMs);
+    assertCurrent();
     activePort = Number(result?.port || 0);
     return result;
   }
 
   async function stop() {
     if (!child) return { ok: true, cleanup: { clean: true, managedProcesses: { attempted: 0, stopped: 0, orphaned: 0 }, localService: { closed: true, forced: false } } };
+    stopGeneration++;
     activePort = 0;
     const owned = child;
     const result = await request('stop', {}, stopTimeoutMs);
@@ -124,6 +132,8 @@ function createServiceProcessClient(options = {}) {
     spawnPromise = null;
     cancelSpawn = null;
     activePort = 0;
+    // No current utility is reporting work; this is not a descendant-exit receipt.
+    publishActivity({ phase: 'snapshot', snapshot: emptyActivity() });
   }
 
   function isListening() {
@@ -135,7 +145,11 @@ function createServiceProcessClient(options = {}) {
   }
 
   async function ensureChild() {
-    if (child && spawnPromise) return spawnPromise;
+    if (child && spawnPromise) {
+      const owned = child;
+      await spawnPromise;
+      return owned;
+    }
     const utility = utilityProcess.fork(modulePath, [], {
       serviceName: 'Rel.AI MCP Service',
       stdio: 'pipe',

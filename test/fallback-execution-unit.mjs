@@ -1338,21 +1338,30 @@ try {
     assert.notEqual(readTaskHistorySessionRecord(config, deliveredDurableWorkId).backgroundOperation.deliveryAcknowledged, true,
       'receipt delivery must not persist a terminal acknowledgement that could break restart replay');
     const executionsBeforeReplay = deliveredDurableExecutions;
+    const noticeOptions = { noticeScope: principalFingerprint(deliveredDurableOptions.principal), workspace: 'app' };
+    const pendingNotice = () => peekFallbackCompletionNotices(config, noticeOptions)
+      .some(notice => notice.operationId === tracked.record.operationId);
+    assert.equal(pendingNotice(), true);
+    const dropped = await handleTransportFallbackRequest(config, request, deliveredDurableOptions);
+    assert.equal(dropped.body.result.structuredContent.exitCode, 0);
+    assert.equal(pendingNotice(), true, 'an undelivered terminal replay must keep its completion notice');
     const terminal = await handleTransportFallbackRequest(config, request, deliveredDurableOptions);
     assert.equal(terminal.body.result.structuredContent.exitCode, 0);
     assert.equal(deliveredDurableExecutions, executionsBeforeReplay, 'terminal retrieval must not repeat the handler');
-    return terminal;
+    return { terminal, pendingNotice };
   };
-  const deliveredDurable = await receiveDeliveredDurable(12);
+  const { terminal: deliveredDurable, pendingNotice: firstNotice } = await receiveDeliveredDurable(12);
   assert.equal(deliveredDurableExecutions, 1);
   assert.equal(deliveredDurable.body.result.structuredContent.stdout, 'durable-delivered-1');
   deliveredDurable.onDelivered();
+  assert.equal(firstNotice(), false, 'successful terminal replay delivery consumes the notice');
   assert.equal(readTaskHistorySessionRecord(config, deliveredDurableWorkId).backgroundOperation.deliveryAcknowledged, true);
   resetFallbackExecutions();
-  const freshDurable = await receiveDeliveredDurable(13);
+  const { terminal: freshDurable, pendingNotice: nextNotice } = await receiveDeliveredDurable(13);
   assert.equal(deliveredDurableExecutions, 2, 'confirmed delivery must survive restart so a later work-bound rerun executes fresh');
   assert.equal(freshDurable.body.result.structuredContent.stdout, 'durable-delivered-2');
   freshDurable.onDelivered();
+  assert.equal(nextNotice(), false);
   assert.equal(readTaskHistorySessionRecord(config, deliveredDurableWorkId).backgroundOperation.deliveryAcknowledged, true);
 
   const noticeWorkId = 'work_completion_notice_test';

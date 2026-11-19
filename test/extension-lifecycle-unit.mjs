@@ -5,10 +5,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
-import { installLocalExtension, removeExtension } from '../src/extensions/registry.js';
+import { installExtension, installLocalExtension, listInstalledExtensions, removeExtension } from '../src/extensions/registry.js';
 import { managedExtensionCommandPath, managedExtensionCommandMetadataPath } from '../src/extensions/paths.js';
 import { discoverSkillInventory } from '../src/skillDiscovery.js';
 import { recoverInterruptedExtensionInstalls } from '../src/extensions/installTransaction.js';
+import { extensionOperationIsHeld } from '../src/extensions/operationLock.js';
 
 const observe = process.argv.includes('--observe');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-extension-lifecycle-'));
@@ -35,6 +36,9 @@ function sourceAt(name, id, version = '1.0.0', cli = true) {
   return directory;
 }
 try {
+  const missingConfig = { stateDir: path.join(root, 'absent-state') };
+  assert.deepEqual(recoverInterruptedExtensionInstalls(missingConfig), { ok: true, recovered: 0, errors: [] });
+  assert.equal(fs.existsSync(path.join(missingConfig.stateDir, 'extensions')), false);
   process.env.PATH = '';
   globalThis.fetch = async url => { assert.equal(String(url), 'https://fixture.test/artifact'); return new Response(artifact); };
   {
@@ -204,6 +208,28 @@ try {
       const child = spawnSync(process.execPath, ['--input-type=module', '-e', setup], { encoding: 'utf8', timeout: 10000, windowsHide: true });
       assert.equal(child.status, 0, child.stderr);
       assert.ok(fs.readdirSync(directory).some(name => name.startsWith('.operation-')), 'child intentionally exits without releasing its fixture lease');
+      if (phase === 'prepared') {
+        const readdir = fs.readdirSync;
+        fs.readdirSync = function(file, options) {
+          if (String(file) === directory && options?.withFileTypes && extensionOperationIsHeld(config)) {
+            throw Object.assign(new Error('Fixture recovery scan unavailable'), { code: 'EIO' });
+          }
+          return readdir.apply(this, arguments);
+        };
+        syncBuiltinESMExports();
+        try {
+          const failed = recoverInterruptedExtensionInstalls(config);
+          assert.equal(failed.ok, false);
+          assert.equal(failed.recovered, 0);
+          const scanError = /Fixture recovery scan unavailable/;
+          assert.match(failed.errors[0].error, scanError);
+          assert.throws(() => listInstalledExtensions(config), scanError);
+          assert.throws(() => removeExtension(config, 'absent-fixture'), scanError);
+          await assert.rejects(installExtension(config, 'absent-fixture'), scanError);
+          assert.equal(fs.existsSync(path.join(directory, '.install-transaction-exited-owner.json')), true);
+          assert.equal(fs.readFileSync(path.join(target, 'version'), 'utf8'), 'new');
+        } finally { fs.readdirSync = readdir; syncBuiltinESMExports(); }
+      }
       const result = recoverInterruptedExtensionInstalls(config);
       assert.equal(result.ok, true);
       assert.equal(result.recovered, 1);

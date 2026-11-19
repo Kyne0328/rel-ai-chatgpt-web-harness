@@ -29,7 +29,7 @@ program
 
 program
   .command('doctor [workspace-path]')
-  .description('Inspect local Rel.AI health and optionally apply supported fixes.')
+  .description('Inspect local Rel.AI health and optionally apply supported fixes. Read-only checks exit 0 when healthy, 2 for a reported health error, and 1 on command errors.')
   .option('--fix', 'Apply supported fixes.')
   .action(async (workspacePath, options) => {
     const config = readConfig({ allowMissing: true });
@@ -37,6 +37,7 @@ program
       ? await productUx.doctorFix(config, { workspacePath, overwrite: false })
       : await productUx.healthMonitor(config, {});
     printJson(result);
+    if (!options.fix && result.ok === false) process.exitCode = 2;
   });
 
 program

@@ -128,6 +128,9 @@ function createDesktopLifecycleManager(options = {}) {
         ...loginItemIdentity
       });
       status = { ...status, launchAtLogin: readLaunchAtLogin() };
+      if (!status.launchAtLogin.supported || status.launchAtLogin.enabled !== (enabled === true)) {
+        throw new Error(status.launchAtLogin.reason || 'Windows did not confirm the requested launch at sign-in setting. Check Startup apps and retry.');
+      }
       onLog(`Launch at sign-in ${status.launchAtLogin.enabled ? 'enabled' : 'disabled'}.`, { source: 'desktop-lifecycle' });
       return { ok: true, status: snapshot() };
     } catch (error) {

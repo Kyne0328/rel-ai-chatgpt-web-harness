@@ -283,6 +283,18 @@ function compactSkillDiscovery(value) {
   return Object.keys(result).length ? result : undefined;
 }
 
+// Preserve the recovery pointer, not emitted text or child arguments. Invalid or
+// oversized identities must be omitted rather than truncated into different ones.
+function compactCompositionReceipt(value) {
+  if (typeof value?.compositionId !== 'string' || !/^compose_[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(value.compositionId)) return {};
+  return {
+    compositionId: value.compositionId,
+    ...(typeof value.compositionOutputRef === 'string' && /^spill_[A-Za-z0-9_-]{20,80}$/.test(value.compositionOutputRef)
+      ? { compositionOutputRef: value.compositionOutputRef } : {}),
+    ...(Number.isSafeInteger(value.unsettledCalls) && value.unsettledCalls >= 0 ? { unsettledCalls: value.unsettledCalls } : {})
+  };
+}
+
 function compactToolResult(payload, originalBytes) {
   if (!payload || typeof payload !== 'object') return { ok: false, truncated: true, originalBytes };
   const bootstrapDiscovery = compactSkillDiscovery(payload.bootstrap?.skillDiscovery);
@@ -290,6 +302,7 @@ function compactToolResult(payload, originalBytes) {
     ok: payload.ok !== false,
     truncated: true,
     originalBytes,
+    ...compactCompositionReceipt(payload),
     skillDiscovery: compactSkillDiscovery(payload.skillDiscovery),
     bootstrap: bootstrapDiscovery ? { skillDiscovery: bootstrapDiscovery } : undefined,
     workspace: boundedText(scalarText(payload.workspace), 512),
@@ -462,7 +475,7 @@ function fitStructuredResult(value, maxBytes) {
   if (jsonBytes(result) <= maxBytes) return result;
   // Final bounded receipt for pathological metadata: no execution success or
   // termination certainty is invented when optional detail must be omitted.
-  const keys = ['ok', 'truncated', 'originalBytes', 'skillDiscovery', 'bootstrap', 'operationId', 'work_id', 'errorCode', 'executed', 'commandSucceeded', 'exitCode', 'timedOut', 'cancelled', 'rootExitConfirmed', 'terminationConfirmed', 'mutationUnknown', 'cleanupPending', 'stdoutOutputRef', 'stderrOutputRef'];
+  const keys = ['ok', 'truncated', 'originalBytes', 'skillDiscovery', 'bootstrap', 'operationId', 'work_id', 'compositionId', 'compositionOutputRef', 'unsettledCalls', 'errorCode', 'executed', 'commandSucceeded', 'exitCode', 'timedOut', 'cancelled', 'rootExitConfirmed', 'terminationConfirmed', 'mutationUnknown', 'cleanupPending', 'stdoutOutputRef', 'stderrOutputRef'];
   const receipt = Object.fromEntries(keys.filter(key => result[key] !== undefined).map(key => [key, result[key]]));
   if (result.results?.[0]) {
     const first = Object.fromEntries(keys.filter(key => result.results[0][key] !== undefined).map(key => [key, result.results[0][key]]));
@@ -472,7 +485,7 @@ function fitStructuredResult(value, maxBytes) {
   if (jsonBytes(receipt) > maxBytes) {
     // Oversized identities cannot be truncated into different valid identities.
     // Keep explicit safety facts, and report unavailable details instead.
-    for (const field of ['work_id', 'stdoutOutputRef', 'stderrOutputRef']) {
+    for (const field of ['work_id', 'stdoutOutputRef', 'stderrOutputRef', 'compositionId', 'compositionOutputRef']) {
       if (jsonBytes(receipt) <= maxBytes) break;
       delete receipt[field];
     }
@@ -526,6 +539,7 @@ function compactOperationResult(operation) {
     revision: boundedScalar(operation.revision),
     error: displayText(operation.error, 1000),
     result: boundedResultScalars({
+      ...compactCompositionReceipt(result),
       commandSucceeded: result.commandSucceeded,
       outputFinalizationTimedOut: result.outputFinalizationTimedOut,
       outputFinalizationError: result.outputFinalizationError,

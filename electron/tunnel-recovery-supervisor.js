@@ -31,6 +31,7 @@ function createTunnelRecoverySupervisor({
   let recoveryGeneration = 0;
   let activeRecoveryGeneration = -1;
   let currentAttempt = null;
+  let deferredObservation = null;
 
   function observe(status = {}) {
     const tunnelStatus = String(status.state || status.tunnelStatus || '');
@@ -55,12 +56,18 @@ function createTunnelRecoverySupervisor({
       scheduleInitial(status.error || 'The Secure MCP Tunnel stopped unexpectedly.');
       return snapshot();
     }
-    if (tunnelStatus === 'disabled' || (tunnelStatus === 'stopped' && !attemptInFlight)) reset(true);
+    if (tunnelStatus === 'disabled' || (tunnelStatus === 'stopped' && !(attemptInFlight && activeRecoveryGeneration === recoveryGeneration))) reset(true);
     return snapshot();
   }
 
   function scheduleInitial(lastError = '') {
-    if (retryTimer || attemptInFlight) return snapshot();
+    if (retryTimer) return snapshot();
+    if (attemptInFlight) {
+      // A new outage can arrive after a healthy/terminal observation invalidated
+      // the pending restart. Defer it until the old owner releases the runtime.
+      if (activeRecoveryGeneration !== recoveryGeneration) deferredObservation = lastError;
+      return snapshot();
+    }
     const runGeneration = recoveryGeneration;
     scheduleDelay(lastError).then(shouldRun => {
       if (!shouldRun || runGeneration !== recoveryGeneration) return;
@@ -104,7 +111,14 @@ function createTunnelRecoverySupervisor({
           error: error instanceof Error ? error.message : String(error || 'Secure MCP Tunnel retry failed.')
         };
       } finally {
-        if (currentAttempt === result) attemptInFlight = false;
+        if (currentAttempt === result) {
+          attemptInFlight = false;
+          if (deferredObservation !== null) {
+            const lastError = deferredObservation;
+            deferredObservation = null;
+            scheduleInitial(lastError);
+          }
+        }
       }
       result.resolve(status);
 
@@ -169,6 +183,7 @@ function createTunnelRecoverySupervisor({
 
   function reset(invalidateInFlight = false) {
     if (invalidateInFlight) recoveryGeneration += 1;
+    deferredObservation = null;
     clearScheduledRetry();
     attempt = 0;
     nextRetryAt = null;

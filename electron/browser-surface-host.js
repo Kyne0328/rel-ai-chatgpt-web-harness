@@ -118,6 +118,7 @@ function createBrowserSurfaceHost(options = {}) {
       control: 'ai',
       handoffReason: '',
       createdAt: new Date().toISOString(),
+      siteWrites: new Map(),
       pendingDownloads: new Map(),
       pendingPermissions: new Map(),
       permissionGrants: new Set(),
@@ -428,7 +429,18 @@ function createBrowserSurfaceHost(options = {}) {
       for (const pending of record.pendingPermissions.values()) settlePermissionRequest(record, pending, false);
       record.pendingPermissions.clear();
       record.permissionGrants.clear();
-      if (record.persistent) record.electronSession.setCertificateVerifyProc?.(null);
+      if (record.persistent) {
+        // A completed navigation can still have its registry rename in flight.
+        // Retry already failed origins only on an explicit close attempt.
+        for (const [origin, pending] of record.siteWrites) {
+          if (!pending) rememberPersistentSite(record, origin);
+        }
+        await withTimeout(Promise.all([...record.siteWrites.values()]), PAGE_CLOSE_TIMEOUT_MS,
+          'Timed out saving browser site metadata. Retry closing the session.');
+        if (record.siteWrites.size) throw browserError('BROWSER_PROFILE_WRITE_FAILED',
+          'Browser site metadata was not saved. Retry closing the session.');
+        record.electronSession.setCertificateVerifyProc?.(null);
+      }
       if (!record.persistent) {
         await Promise.allSettled([
           Promise.resolve(record.electronSession.clearStorageData?.()),
@@ -1009,10 +1021,12 @@ function createBrowserSurfaceHost(options = {}) {
         (method === 'POST' && writePath.test(target.pathname)))) {
       throw new Error('Unsupported Goal Mode protocol endpoint.');
     }
+    throwIfAborted(options.signal);
     const browserSession = session.fromPath(account.directory);
     const rateLimit = goalReadAdmission(account, method === 'GET');
     if (rateLimit) return rateLimit;
-    const auth = await readGoalProtocolAuth(account, browserSession);
+    // Authentication is shared by account. Cancel only this caller's wait.
+    const auth = await withAbort(readGoalProtocolAuth(account, browserSession), options.signal);
     if (!auth.ok) { rememberGoalReadLimit(account, auth); return auth; }
     throwIfAborted(options.signal);
     const admission = goalReadAdmission(account);
@@ -1379,7 +1393,13 @@ function createBrowserSurfaceHost(options = {}) {
 
   function rememberPersistentSite(record, value) {
     if (!record?.persistent || !record.profileDirectory) return;
-    void Promise.resolve(recordPersistentSite(record.profileDirectory, value)).catch(onError);
+    const origin = normalizeSavedSiteOrigin(value);
+    if (!origin || record.siteWrites.get(origin)) return;
+    const write = Promise.resolve().then(() => recordPersistentSite(record.profileDirectory, origin)).then(
+      () => { record.siteWrites.delete(origin); },
+      error => { record.siteWrites.set(origin, null); onError(error); }
+    );
+    record.siteWrites.set(origin, write);
   }
 
   function configurePage(record, page) {

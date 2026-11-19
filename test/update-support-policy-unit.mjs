@@ -84,6 +84,55 @@ assert.equal(unavailableStatus.canContinue, true);
 
 
 function deferred() { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; }
+{
+  const dir = path.join(root, 'clock-fixture');
+  fs.mkdirSync(dir);
+  const anchor = afterDeadline;
+  let clock = anchor;
+  const timedPolicy = { ...policy, enforceAfter: new Date(anchor + 100).toISOString(),
+    policyExpiresAt: new Date(anchor + 300).toISOString() };
+  fs.writeFileSync(path.join(dir, 'update-support-policy.json'), JSON.stringify({ schemaVersion: 1, policy: timedPolicy }));
+  const requests = [], statuses = [], writes = [], timers = new Set();
+  const replacementPublished = deferred();
+  const lifecycle = createUpdateSupportPolicy({
+    app: { ...app, getPath: () => dir }, now: () => clock,
+    fetchImpl: () => { const request = deferred(); requests.push(request); return request.promise; },
+    writeCacheImpl: async (_file, value) => { writes.push(value.message); },
+    onStatusChange: value => { statuses.push(value.state); if (value.message === 'replacement') replacementPublished.resolve(); },
+    setTimer: (run, delay) => { const timer = { run, delay, unref() {} }; timers.add(timer); return timer; },
+    clearTimer: timer => { timers.delete(timer); }
+  });
+  const advance = (delta, expectedState) => {
+    assert.equal(timers.size, 1, 'one policy timer owns refresh and clock boundaries');
+    const timer = [...timers][0];
+    assert.equal(timer.delay, delta);
+    clock += delta;
+    timers.delete(timer);
+    timer.run();
+    assert.equal(lifecycle.getStatus().state, expectedState);
+    assert.equal(statuses.at(-1), expectedState);
+  };
+  assert.equal(lifecycle.start().state, 'deprecated');
+  advance(100, 'required');
+  assert.equal(lifecycle.getStatus().canContinue, false);
+  advance(200, 'unavailable');
+  assert.equal(lifecycle.getStatus().canContinue, true, 'expired advice must stop blocking even while offline');
+  const response = value => ({ ok: true, json: async () => value });
+  requests[0].resolve(response({ ...timedPolicy, message: 'superseded' }));
+  requests.at(-1).resolve(response({ ...policy, message: 'replacement' }));
+  await replacementPublished.promise;
+  assert.deepEqual(writes, ['replacement']);
+  assert.equal(lifecycle.getStatus().state, 'required', 'an unexpired replacement retains canonical enforcement');
+  const oldTimer = [...timers][0];
+  await lifecycle.stop();
+  assert.equal(timers.size, 0);
+  lifecycle.start();
+  const calls = requests.length;
+  oldTimer.run();
+  assert.equal(requests.length, calls, 'stale timer must not refresh after stop/restart');
+  assert.equal(timers.size, 1);
+  await lifecycle.stop();
+}
 for (const boundary of ['fetch', 'body']) {
   const pending = deferred();
   const bodyStarted = deferred();

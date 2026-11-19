@@ -27,7 +27,11 @@ function completeExtensionInstallTransaction(config, id) {
 
 function recoverInterruptedExtensionInstalls(config, options = {}) {
   const root = extensionRoot(config);
-  if (!fs.existsSync(root)) return { ok: true, recovered: 0, errors: [] };
+  try { fs.statSync(root); }
+  catch (error) {
+    if (error?.code === 'ENOENT') return { ok: true, recovered: 0, errors: [] };
+    return recoveryScanFailure(error);
+  }
   const ownsLease = options.lease && extensionOperationIsHeld(config, options.lease);
   if (!ownsLease && extensionOperationIsHeld(config)) {
     return { ok: true, recovered: 0, errors: [], skipped: true, busy: true };
@@ -43,9 +47,14 @@ function recoverInterruptedExtensionInstalls(config, options = {}) {
   finally { if (!ownsLease) lease.release(); }
 }
 
+function recoveryScanFailure(error) {
+  return { ok: false, recovered: 0, errors: [{ error: 'Could not scan extension recovery state: ' + (error instanceof Error ? error.message : String(error)) }] };
+}
+
 function recoverUnderLease(root) {
   let entries;
-  try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { return { ok: true, recovered: 0, errors: [] }; }
+  try { entries = fs.readdirSync(root, { withFileTypes: true }); }
+  catch (error) { return recoveryScanFailure(error); }
   const errors = [];
   let recovered = 0;
   for (const entry of entries) {

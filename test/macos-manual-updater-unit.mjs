@@ -116,9 +116,19 @@ assert.ok(fetchCalls.some(call => call.url === fixture.assetUrl && call.range ==
 await updater.downloadUpdate({ version, onProgress: value => progress.push(value) });
 assert.equal(fetchCalls.filter(call => call.url === fixture.assetUrl).length, 1, 'a verified cached DMG must not be downloaded again');
 
+const requestsBeforeOpen = fetchCalls.length;
 const opened = await updater.openDownloaded(version);
 assert.equal(opened.ok, true);
 assert.equal(opened.assetName, fixture.assetName);
+assert.equal(openedPath, expectedPath);
+assert.equal(fetchCalls.length, requestsBeforeOpen, 'opening a verified cached DMG must work offline');
+openedPath = '';
+fs.truncateSync(expectedPath, 0);
+await assert.rejects(() => updater.openDownloaded(version), /download it again/i);
+assert.equal(openedPath, '', 'a damaged cached DMG must not reach the OS opener');
+assert.equal(fetchCalls.length, requestsBeforeOpen, 'a damaged cache must not initiate a download on open');
+await updater.downloadUpdate({ version });
+assert.equal((await updater.openDownloaded(version)).ok, true, 'downloading verified bytes again restores opening');
 assert.equal(openedPath, expectedPath);
 
 const armFixture = releaseFixture(version, 'arm64', bytes);

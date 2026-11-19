@@ -54,6 +54,21 @@ function releaseArtifactNames(version, options = {}) {
   };
 }
 
+// Every role returned by releaseArtifactNames is published, including the generated metadata.
+function assertPromotableCandidate(version, candidate) {
+  if (candidate?.tagName !== version || candidate.isDraft !== false || candidate.isPrerelease !== true
+    || !Array.isArray(candidate.assets)) {
+    throw new Error('Only the requested published prerelease candidate can be promoted to stable.');
+  }
+  for (const name of Object.values(releaseArtifactNames(version))) {
+    const matching = candidate.assets.filter(asset => asset?.name === name);
+    if (matching.length !== 1 || String(matching[0].state).toLowerCase() !== 'uploaded'
+      || !Number.isSafeInteger(matching[0].size) || matching[0].size <= 0) {
+      throw new Error(`Release candidate requires one non-empty uploaded asset: ${name}.`);
+    }
+  }
+}
+
 function platformReleaseArtifactNames(version, platform, architecture = 'x64', options = {}) {
   const normalizedPlatform = normalizeElectronPlatform(platform);
   const normalizedArch = normalizeElectronArch(architecture);
@@ -109,8 +124,15 @@ function invalidateDerivedReleaseEvidence(directory, version) {
   return removed;
 }
 
-function parseLatestMetadata(source) {
-  const lines = String(source || '').split(/\r?\n/);
+function parseLatestMetadata(source, expectedVersion) {
+  const lines = String(source || '').replace(/^\uFEFF/, '').split(/\r?\n/);
+  // The updater reads this version before choosing an artifact. A matching
+  // filename or digest alone cannot make a stale feed discoverable.
+  const versions = lines.map(line => /^version:[ \t]*(.*?)[ \t]*$/.exec(line))
+    .filter(Boolean).map(match => parseYamlScalar(match[1]));
+  if (!expectedVersion || versions.length !== 1 || versions[0] !== expectedVersion) {
+    throw new Error(`Updater metadata must declare exactly one release version matching ${expectedVersion}.`);
+  }
   const files = [];
   let inFiles = false;
   let current = null;
@@ -265,6 +287,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
 }
 
 export {
+  assertPromotableCandidate,
   exactBasename,
   invalidateDerivedReleaseEvidence,
   parseAssetList,

@@ -169,7 +169,7 @@ interface OutputSpillWriter {
   flush(): Promise<void>;
   finish(options?: { readonly timeoutMs?: number }): Promise<OutputSpillResult | null>;
   readonly pendingBytes: number;
-  waitForLowWatermark(limit?: number): Promise<void>;
+  waitForLowWatermark(limit?: number, options?: { readonly timeoutMs?: number }): Promise<void>;
 }
 
 function processPid(target: ProcessTarget): number {
@@ -702,14 +702,20 @@ async function runProcess(command: string, args: readonly string[] = [], options
       if (timeoutMs > 0) windowsTimeoutTimer = setTimeout(() => requestWindowsTermination('timeout'), timeoutMs);
     }
     const mutationProcessRecorded = Boolean(recordCurrentMutationProcess(subprocess.pid, mutationProcessFile, execaOptions.detached ? subprocess.pid : 0));
+    let drainingDurableOutput = false;
+    const waitForDurableSpills = async () => {
+      const options = drainingDurableOutput ? { timeoutMs: outputFinalizationTimeoutMs } : undefined;
+      await Promise.all([
+        stdoutSpill.waitForLowWatermark(OUTPUT_SPILL_LOW_WATER_BYTES, options),
+        stderrSpill.waitForLowWatermark(OUTPUT_SPILL_LOW_WATER_BYTES, options)
+      ]);
+    };
     durableOutput = windowsJob && mutationProcessFile ? observeDurableProcessOutput(windowsJob.directory,
       (stream: string, buffer: Buffer) => {
         if (stream === 'stdout') { stdoutBytes += buffer.length; stdoutBuffer.append(buffer); }
         else { stderrBytes += buffer.length; stderrBuffer.append(buffer); }
         try { options.onOutput?.(stream === 'stdout' ? 'stdout' : 'stderr', buffer); } catch {}
-      }, async () => {
-        await Promise.all([stdoutSpill.waitForLowWatermark(OUTPUT_SPILL_LOW_WATER_BYTES), stderrSpill.waitForLowWatermark(OUTPUT_SPILL_LOW_WATER_BYTES)]);
-      }) : null;
+      }, waitForDurableSpills) : null;
     const stdoutBackpressure = createOutputBackpressure(subprocess.stdout, stdoutSpill);
     const stderrBackpressure = createOutputBackpressure(subprocess.stderr, stderrSpill);
     subprocess.stdout?.on('data', (chunk: Buffer | string) => {
@@ -776,6 +782,11 @@ async function runProcess(command: string, args: readonly string[] = [], options
       stderrBackpressure.release();
     }
     windowsTerminationOutcome ||= windowsTermination.promise ? await windowsTermination.promise : null;
+    if (durableOutput) {
+      drainingDurableOutput = true;
+      // Also bound a poll already waiting on spill I/O when the native child exited.
+      await waitForDurableSpills();
+    }
     const durableOutputError = await durableOutput?.finish() || '';
     const signalTimedOut = isTimeoutAbort(options.signal)
       && (windowsTermination.kind === 'timeout' || result.isCanceled === true);

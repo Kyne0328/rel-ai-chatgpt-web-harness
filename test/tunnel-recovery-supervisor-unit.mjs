@@ -221,3 +221,30 @@ function deferred() {
   assert.equal(scheduled[0].cancelled, true);
   supervisor.cancel();
 }
+
+// A fresh outage must survive the obsolete restart without overlapping its owner.
+for (const terminal of [null, 'running', 'disabled', 'stopped']) {
+  const gate = deferred();
+  const timers = [];
+  let calls = 0;
+  const supervisor = createTunnelRecoverySupervisor({
+    restartConnection: () => ++calls === 1 ? gate.promise : Promise.resolve({ state: 'running' }),
+    setTimer(fn) { const timer = { fn, cancelled: false }; timers.push(timer); return timer; },
+    clearTimer(timer) { timer.cancelled = true; }
+  });
+  const obsolete = supervisor.retryNow();
+  supervisor.observe({ state: 'running' });
+  supervisor.observe({ state: 'failed', errorCode: 'tunnel_connection_interrupted' });
+  supervisor.observe({ state: 'failed', errorCode: 'tunnel_connection_interrupted' });
+  if (terminal) supervisor.observe({ state: terminal });
+  assert.equal(timers.length, 0, 'wait for the obsolete restart to release the runtime');
+  gate.resolve({ state: 'running' });
+  await obsolete;
+  assert.equal(timers.length, terminal ? 0 : 1, 'only the latest observation owns automatic recovery');
+  if (!terminal) {
+    await fireTimer(timers[0]);
+    assert.equal(calls, 2);
+    assert.equal(supervisor.snapshot().scheduled, false);
+  }
+  supervisor.cancel();
+}

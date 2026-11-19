@@ -35,7 +35,16 @@ function readDesktopSettings(runtimeState = {}) {
   };
 }
 
-async function saveDesktopSettings(settings = {}, runtimeActions = {}) {
+// Launcher settings, credentials, and reconnect/rollback form one transaction
+// for the primary connection owned by this desktop process.
+let pendingSettingsSave = Promise.resolve();
+function saveDesktopSettings(settings = {}, runtimeActions = {}) {
+  const operation = pendingSettingsSave.then(() => applyDesktopSettings(settings, runtimeActions));
+  pendingSettingsSave = operation.then(() => {}, () => {});
+  return operation;
+}
+
+async function applyDesktopSettings(settings, runtimeActions) {
   const {
     setNotificationsEnabled = () => true,
     getNotificationsEnabled = () => true,

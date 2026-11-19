@@ -671,6 +671,36 @@ test('verified sign-in resumes only its own authentication waits and preserves S
   });
 });
 
+test('a bound Loop can recover sign-in after a finished iteration without losing an uncertain receipt', async t => {
+  await withMonitoredGoal(t, async f => {
+    const tunnelId = 'tunnel_accountA12345';
+    const principal = { clientId: 'secure-tunnel:' + tunnelId };
+    const owner = principalFingerprint(principal);
+    f.patchGoal({ owner, tunnelId, mode: 'loop', binding: null });
+    const link = ensureChatLink(f.config, f.work_id, { connector: true, principal });
+    const { binding } = commitGoalBinding(f.config, loadGoal(f.config, f.work_id),
+      { conversationId: ID, messageId: 'user-1', receiptMessageId: 'tool-receipt' });
+    const pendingPrompt = 'Previously claimed fixture continuation';
+    f.patchGoal({ retryCount: 5, pendingNode: 'a', pendingOutcome: 'uncertain', pendingPrompt });
+    recordTaskActivityEvent(f.config, { task: { ...f.task(), principalFingerprint: owner, plan: { revision: 1,
+      steps: [{ id: 'iteration', title: 'Complete this iteration', status: 'completed' }] } } });
+    resetToolActivity(); // Only durable task and binding state remain.
+    await pollGoal(f.config, f.work_id, { nativeTransport: async () => ({ ok: false, status: 401 }) });
+    assert.equal(loadGoal(f.config, f.work_id).state, 'needs_auth');
+    assert.deepEqual(resumeAuthenticatedGoals(f.config, 'tunnel_accountB12345').resumedWorkIds, []);
+    f.patchGoal({ mode: 'goal' });
+    assert.deepEqual(resumeAuthenticatedGoals(f.config, tunnelId).resumedWorkIds, [], 'a finite resolved Goal stays closed to auto-resume');
+    f.patchGoal({ mode: 'loop' });
+    assert.deepEqual(resumeAuthenticatedGoals(f.config, tunnelId).resumedWorkIds, [f.work_id]);
+    const resumed = loadGoal(f.config, f.work_id);
+    assert.deepEqual(resumed.binding, binding);
+    assert.equal(readChatLink(f.config, resumed).linkId, link.link_id);
+    assert.equal(resumed.pendingNode, 'a');
+    assert.equal(resumed.pendingOutcome, 'uncertain');
+    assert.equal(resumed.pendingPrompt, pendingPrompt);
+  });
+});
+
 test('sign-in refresh supersedes an in-flight obsolete authentication failure', async t => {
   await withMonitoredGoal(t, async f => {
     const tunnelId = 'tunnel_accountA12345';
@@ -716,6 +746,41 @@ test('uncertain submissions reconcile their exact receipt without another Send',
     assert.equal(sends, 1);
     assert.equal(f.status().continuationCount, 1);
     assert.equal(f.status().state, 'monitoring');
+  });
+});
+
+test('fixed Loop reconciles its exact projected continuation without replaying an uncertain send', async t => {
+  await withMonitoredGoal(t, async f => {
+    f.patchGoal({ mode: 'loop', strategy: 'fixed', brief: 'Maintain the fixture', lastCommandId: 'user-1' });
+    const attempts = [];
+    const deps = { nativeTransport: async payload => {
+      if (payload.action === 'continue') {
+        attempts.push(payload);
+        return { ok: false, uncertain: true, stage: 'readback' };
+      }
+      return { ok: true, data: await readConversationProjection(response(f.tree)) };
+    } };
+    await pollGoal(f.config, f.work_id, deps);
+    assert.equal(f.status().state, 'verifying');
+    const [{ prompt }] = attempts;
+    assert.ok(prompt.startsWith('Continue Loop work ' + f.work_id + ' within this original brief: '));
+    f.tree.mapping.sent = { parent: 'unrelated', message: { id: 'receipt', author: { role: 'user' },
+      content: { parts: [prompt] } } };
+    f.tree.current_node = 'sent';
+    t.mock.timers.tick(30_000);
+    await pollGoal(f.config, f.work_id, deps);
+    assert.equal(f.status().continuationCount, 0, 'an exact prompt on a different branch is not a receipt');
+    f.tree.mapping.sent.parent = 'a';
+    f.tree.mapping.sent.message.content.parts = [prompt + ' Changed.'];
+    t.mock.timers.tick(30_000);
+    await pollGoal(f.config, f.work_id, deps);
+    assert.equal(f.status().continuationCount, 0, 'a matching prefix is not an exact prompt');
+    f.tree.mapping.sent.message.content.parts = [prompt];
+    t.mock.timers.tick(30_000);
+    await pollGoal(f.config, f.work_id, deps);
+    assert.equal(f.status().continuationCount, 1, 'the emitted Loop prompt must survive projection');
+    assert.equal(f.status().state, 'monitoring');
+    assert.equal(attempts.length, 1, 'reconciliation must never resend');
   });
 });
 
@@ -795,6 +860,57 @@ test('read failures preserve accepted branch claims and Stop Goal wins against l
     } });
     assert.equal(f.status().goalActive, false);
     assert.equal(f.status().state, 'stopped');
+  });
+});
+
+test('an unavailable original connection pauses linking and pending verification until explicit Resume', async t => {
+  for (const bound of [false, true]) await withMonitoredGoal(t, async f => {
+    const tunnelId = 'tunnel_fixtureOriginal01';
+    const principal = { clientId: 'secure-tunnel:' + tunnelId };
+    const context = { ...f.context, connector: true, principal };
+    f.patchGoal({ owner: principalFingerprint(principal), tunnelId, binding: null, conversationId: bound ? ID : '',
+      conversationCorrelation: '', observedNode: '', stableSince: 0 });
+    const link = ensureChatLink(f.config, f.work_id, context);
+    const binding = bound ? commitGoalBinding(f.config, loadGoal(f.config, f.work_id),
+      { conversationId: ID, messageId: 'user-1', receiptMessageId: 'tool-receipt' }).binding : null;
+    if (bound) f.patchGoal({ pendingNode: 'a', pendingOutcome: 'uncertain', pendingPrompt: 'Earlier fixture intent' });
+    let attempts = 0;
+    const unavailable = { nativeTransport: async req => {
+      assert.equal(req.tunnelId, tunnelId);
+      assert.equal(req.action, undefined);
+      attempts++;
+      throw Object.assign(new Error('Local native connection is disabled.'), { code: 'GOAL_ACCOUNT_UNAVAILABLE' });
+    } };
+    await pollGoal(f.config, f.work_id, unavailable);
+    const status = goalStatus(f.config, { work_id: f.work_id }, context);
+    assert.equal(status.state, 'needs_user');
+    assert.equal(status.goalActive, false);
+    assert.equal(status.nextAttemptAt, undefined);
+    assert.equal(status.authRequired, undefined);
+    assert.equal(status.retryCount, 0);
+    assert.equal(status.pairingMarker, undefined);
+    assert.equal(status.error, 'The original ChatGPT connection is unavailable. Restore that same connection in Rel.AI. Then ask ChatGPT on that connection to resume this task and include its existing Work ID.');
+    const paused = loadGoal(f.config, f.work_id);
+    assert.deepEqual(paused.binding, binding);
+    if (bound) {
+      assert.equal(paused.pendingNode, 'a');
+      assert.equal(paused.pendingOutcome, 'uncertain');
+      assert.equal(paused.pendingPrompt, 'Earlier fixture intent');
+    }
+    t.mock.timers.tick(130_000);
+    await pollGoal(f.config, f.work_id, unavailable);
+    assert.equal(attempts, 1);
+    assert.deepEqual(resumeAuthenticatedGoals(f.config, tunnelId).resumedWorkIds, []);
+    assert.equal(resumeGoal(f.config, { work_id: f.work_id }, context).goalActive, true);
+    const fixture = discoveryFixture({ ordinary: [{ id: ID, update_time: Date.now() / 1000 }],
+      trees: { [ID]: linkedConversation(ID, f.work_id, link) } });
+    await pollGoal(f.config, f.work_id, { nativeTransport: req => {
+      assert.equal(req.tunnelId, tunnelId);
+      assert.equal(req.action, undefined);
+      return fixture.transport(req);
+    } });
+    assert.equal(loadGoal(f.config, f.work_id).binding?.conversationId, ID);
+    assert.equal(loadGoal(f.config, f.work_id).continuationCount, 0);
   });
 });
 
@@ -1065,6 +1181,11 @@ test('monitor stops automatic recovery when a continuation has no new tool activ
 
 test('monitor ends completed, failed and unavailable sessions without inventing success', async t => {
   await withMonitoredGoal(t, async f => {
+    ensureChatLink(f.config, f.work_id, { ...f.context, connector: true });
+    const { binding } = commitGoalBinding(f.config, loadGoal(f.config, f.work_id),
+      { conversationId: ID, messageId: 'user-1', receiptMessageId: 'tool-receipt' });
+    f.patchGoal({ state: 'retrying', nextAttemptAt: Date.now() + 60_000, authRequired: true,
+      pendingNode: 'a', pendingOutcome: 'uncertain', pendingPrompt: 'Previously claimed fixture prompt' });
     const finish = beginConnectorToolCall({ tool: 'relai_work', internalOperation: 'work.finish',
       taskId: f.work_id, scopeId: 'goal-monitor-fixture' });
     finish.requestCompletion({ summary: 'Fixture complete' });
@@ -1072,6 +1193,11 @@ test('monitor ends completed, failed and unavailable sessions without inventing 
     await pollGoal(f.config, f.work_id, f.deps);
     assert.equal(f.status().state, 'finished');
     assert.equal(f.status().goalActive, false);
+    assert.equal(f.status().nextAttemptAt, undefined, 'a terminal task cannot advertise a pending check');
+    assert.equal(f.status().authRequired, undefined, 'a terminal task cannot ask for sign-in');
+    const terminal = loadGoal(f.config, f.work_id);
+    assert.deepEqual(terminal.binding, binding);
+    assert.equal(terminal.pendingOutcome, 'uncertain', 'closure does not acknowledge or discard the prior attempt');
     assert.equal(f.calls.length, 0, 'completion must stop before any browser request');
   });
   await withMonitoredGoal(t, async f => {
@@ -1813,23 +1939,44 @@ test('versioned linking accepts a delayed receipt after later user messages and 
   assert.equal((await findRecentGoalCommand(deps)).state, 'absent');
 });
 
-test('versioned linking refuses duplicate recent receipts and never selects a first match', async () => {
-  const workId = 'recent-link-duplicate';
-  const link = { version: 1, link_id: 'r'.repeat(32) };
-  const project = 'g-p-' + 'f'.repeat(32);
-  const fetch = async url => {
-    if (url.includes('/conversations?offset=')) return response({
-      items: [{ id: ID, update_time: new Date().toISOString() }], has_more: false
-    });
-    if (url.includes('/snorlax/sidebar')) return response({ items: [{
-      gizmo: { gizmo: { id: project } }, conversations: {
-        items: [{ id: OTHER, update_time: new Date().toISOString() }]
-      }
-    }] });
-    return response(linkedConversation(url.endsWith(ID) ? ID : OTHER, workId, link));
-  };
-  const deps = { workId, linkId: link.link_id, issuedAt: Date.now(), credentials, fetch };
-  assert.equal((await findRecentGoalCommand(deps)).state, 'ambiguous');
+test('versioned linking reports duplicate recent receipts and stays paused without selecting a chat', async t => {
+  await withMonitoredGoal(t, async f => {
+    const link = ensureChatLink(f.config, f.work_id, { ...f.context, connector: true });
+    f.patchGoal({ binding: null, conversationId: '', conversationCorrelation: 'opaque-host' });
+    const updated = Date.now() / 1000;
+    const fixture = discoveryFixture({ ordinary: [{ id: ID, update_time: updated }],
+      pages: [[projectPreview(1, [{ id: OTHER, update_time: updated }])]],
+      trees: { [ID]: linkedConversation(ID, f.work_id, link), [OTHER]: linkedConversation(OTHER, f.work_id, link) } });
+    await pollGoal(f.config, f.work_id, { nativeTransport: fixture.transport });
+    assert.equal(f.status().chatLink.state, 'conflicting_matches');
+    assert.equal(f.status().goalActive, false);
+    assert.equal(f.status().conversationId, null);
+    assert.equal(loadGoal(f.config, f.work_id).binding, null);
+    const before = fixture.requests.length;
+    await pollGoal(f.config, f.work_id, { nativeTransport: request => fixture.transport(request) });
+    assert.equal(fixture.requests.length, before, 'later polls must not choose between duplicate receipts');
+    stopGoal(f.config, { work_id: f.work_id }, f.context);
+    assert.equal(f.status().chatLink.state, 'inactive', 'explicit Stop supersedes the conflict diagnosis');
+  });
+});
+
+test('an open Loop with an empty catalogue keeps its pairing instruction after an iteration resolves', async t => {
+  await withMonitoredGoal(t, async f => {
+    const context = { ...f.context, connector: true };
+    f.patchGoal({ mode: 'loop', binding: null, conversationId: '' });
+    const link = ensureChatLink(f.config, f.work_id, context);
+    const iteration = beginConnectorToolCall({ tool: 'relai_read', internalOperation: 'read',
+      taskId: f.work_id, scopeId: 'goal-monitor-fixture' });
+    iteration.update({ plan: { revision: 1, steps: [{ id: 'one', title: 'Inspect fixture', status: 'completed' }] } });
+    iteration({ ok: true });
+    const empty = discoveryFixture();
+    await pollGoal(f.config, f.work_id, { nativeTransport: empty.transport });
+    const pending = goalStatus(f.config, { work_id: f.work_id }, context);
+    assert.equal(pending.chatLink.state, 'finding_chat');
+    assert.equal(pending.pairingMarker, chatPairingMarker(f.work_id, link.link_id));
+    assert.match(pending.nextAction, /pairingMarker/, 'the actionable linking instruction must not be replaced by iteration advice');
+    assert.equal(f.status().continuationCount, 0);
+  });
 });
 
 test('automatic linking stays resumable after five misses and binds a delayed receipt without recovery', async t => {
@@ -1879,24 +2026,41 @@ test('stopped and user-paused goals do not report idle chat discovery as an erro
 });
 
 test('monitor startup recovers old lookup failures while preserving Stop, pauses and uncertain sends', async t => {
-  for (const state of ['needs_user', 'stopped', 'paused', 'uncertain']) await withMonitoredGoal(t, async f => {
+  for (const state of ['needs_user', 'stopped', 'paused', 'uncertain', 'malformed']) await withMonitoredGoal(t, async f => {
+    const orphan = state === 'uncertain' || state === 'malformed';
     const now = Date.now();
     t.mock.timers.reset();
     t.mock.timers.enable({ apis: ['Date', 'setTimeout', 'setInterval'], now });
-    f.patchGoal({ binding: null, active: false, conversationId: '', state: state === 'uncertain' ? 'needs_user' : state,
+    const previousBinding = state === 'malformed' ? { version: 0, conversationId: ID } : null;
+    f.patchGoal({ binding: previousBinding, active: state === 'malformed', conversationId: state === 'malformed' ? 'not-a-chat-id' : '',
+      state: state === 'malformed' ? 'verifying' : orphan ? 'needs_user' : state,
       continuationCount: 4, ...(state === 'paused' ? { pauseReason: 'user' } : {}),
-      ...(state === 'uncertain' ? { pendingNode: 'old-node', pendingOutcome: 'uncertain', pendingPrompt: 'Original prompt' } : {}),
+      ...(orphan ? { pendingNode: 'old-node', pendingOutcome: 'uncertain', pendingPrompt: 'Original prompt' } : {}),
       error: 'The named ChatGPT Project was not found in the connected account.' });
-    configureGoalBrowserTransport(async () => ({ ok: true, data: { items: [] } }));
+    let calls = 0;
+    configureGoalBrowserTransport(async () => { calls++; return { ok: true, data: { items: [] } }; });
     try {
       startGoalMonitor(f.config);
       const goal = loadGoal(f.config, f.work_id);
-      assert.equal(goal.active, state === 'needs_user' || state === 'uncertain', state);
+      assert.equal(goal.active, state === 'needs_user', state);
       assert.equal(goal.continuationCount, 4);
-      if (state === 'uncertain') {
+      if (orphan) {
+        assert.equal(goal.state, 'needs_user');
+        assert.deepEqual(goal.binding, previousBinding, 'preserve stored evidence without using it as a replacement identity');
+        assert.equal(f.status().chatLink.state, 'needs_attention');
+        assert.equal(f.status().chatLink.conversationUrl, undefined);
+        assert.equal(f.status().nextAttemptAt, undefined);
+        assert.match(f.status().error, /original chat/i);
         assert.equal(goal.pendingNode, 'old-node');
         assert.equal(goal.pendingOutcome, 'uncertain');
         assert.equal(goal.pendingPrompt, 'Original prompt');
+        stopGoalMonitor();
+        startGoalMonitor(f.config);
+        await pollGoal(f.config, f.work_id);
+        assert.equal(loadGoal(f.config, f.work_id).revision, goal.revision, 'restarting cannot reopen the orphan');
+        for (const restart of [resumeGoal, activateGoal]) assert.throws(() =>
+          restart(f.config, { work_id: f.work_id, conversationUrl: 'https://chatgpt.com/c/' + OTHER }, f.context), /original chat/i);
+        assert.equal(calls, 0);
       }
     } finally { stopGoalMonitor(); configureGoalBrowserTransport(null); }
   });
@@ -1970,6 +2134,16 @@ test('versioned monitor links through the owner browser, survives restart and co
     await pollGoal(f.config, f.work_id, deps);
     assert.equal(f.status().chatLink.state, 'linked');
     assert.equal(f.status().conversationId, ID);
+    const bound = loadGoal(f.config, f.work_id).binding;
+    const dashboard = () => dashboardGoalStatus(f.config, f.work_id);
+    assert.equal(dashboard().chatLink.conversationUrl, 'https://chatgpt.com/c/' + ID);
+    for (const mismatch of [{ conversationId: OTHER }, { owner: 'unrelated-fixture' }, { tunnelId: 'unrelated-fixture' }]) {
+      f.patchGoal({ binding: { ...bound, ...mismatch } });
+      assert.equal(dashboard().chatLink.state, 'needs_attention', 'mixed restored binding must not publish a verified handoff');
+      assert.equal(dashboard().chatLink.conversationUrl, undefined);
+      assert.notEqual(f.status().modeAcknowledgement.readiness, 'ready');
+    }
+    f.patchGoal({ binding: bound });
     assert.equal(sends.length, 0);
     stopGoalMonitor();
     t.mock.timers.tick(31_000);
@@ -1986,6 +2160,77 @@ test('versioned monitor links through the owner browser, survives restart and co
     await pollGoal(f.config, f.work_id, deps);
     assert.equal(f.status().state, 'needs_user');
     assert.equal(sends.length, 1, 'a branch without the bound receipt cannot send');
+    assert.equal(dashboard().chatLink.conversationUrl, undefined, 'invalidated branch must not publish a verified handoff');
+    f.patchGoal({ pendingNode: 'a', pendingOutcome: 'uncertain', pendingPrompt: 'Earlier fixture intent' });
+    const resumed = resumeGoal(f.config, { work_id: f.work_id }, f.context);
+    assert.notEqual(resumed.modeAcknowledgement.readiness, 'ready', 'Resume alone is not a fresh branch receipt');
+    assert.equal(resumed.chatLink.conversationUrl, undefined);
+    assert.equal(dashboard().chatLink.conversationUrl, undefined);
+    await pollGoal(f.config, f.work_id, deps);
+    assert.equal(f.status().state, 'needs_user');
+    assert.equal(dashboard().chatLink.conversationUrl, undefined, 'a still-missing receipt cannot restore the handoff');
+    resumeGoal(f.config, { work_id: f.work_id }, f.context);
+    const marked = loadGoal(f.config, f.work_id).binding;
+    assert.equal(marked.revalidationRequired, true);
+    let transientReads = 0;
+    const transient = { nativeTransport: async request => {
+      assert.equal(request.path, '/backend-api/conversation/' + ID);
+      transientReads++;
+      return { ok: false, status: 401 };
+    } };
+    await pollGoal(f.config, f.work_id, transient);
+    const waiting = loadGoal(f.config, f.work_id);
+    assert.equal(waiting.authRequired, true);
+    assert.deepEqual(waiting.binding, marked);
+    assert.equal(waiting.pendingOutcome, 'uncertain');
+    assert.equal(waiting.pendingPrompt, 'Earlier fixture intent');
+    assert.equal(dashboard().chatLink.conversationUrl, undefined);
+    await pollGoal(f.config, f.work_id, transient);
+    assert.equal(transientReads, 1, 'no reads before the backoff deadline');
+    t.mock.timers.tick(Math.max(1, waiting.nextAttemptAt - Date.now() + 1));
+    tree.mapping.a.parent = 'receipt';
+    await pollGoal(f.config, f.work_id, { nativeTransport: request => deps.nativeTransport(request) });
+    assert.equal(dashboard().chatLink.conversationUrl, 'https://chatgpt.com/c/' + ID);
+    const restored = loadGoal(f.config, f.work_id);
+    assert.deepEqual(restored.binding, bound);
+    assert.equal(f.status().authRequired, undefined, 'fresh exact proof clears the sign-in wait from the preceding failed read');
+    assert.equal(f.status().retryCount, 0, 'successful revalidation closes its read-backoff episode');
+    assert.equal(restored.pendingNode, 'a');
+    assert.equal(restored.pendingOutcome, 'uncertain');
+    assert.equal(restored.pendingPrompt, 'Earlier fixture intent');
+    assert.equal(sends.length, 1, 'revalidation cannot replay an unresolved continuation');
+  });
+});
+
+test('Stop and task cancellation win over in-flight original-chat revalidation', async t => {
+  for (const finalState of ['stopped', 'cancelled']) await withMonitoredGoal(t, async f => {
+    const link = ensureChatLink(f.config, f.work_id, { ...f.context, connector: true });
+    const { binding } = commitGoalBinding(f.config, loadGoal(f.config, f.work_id),
+      { conversationId: ID, messageId: 'user-1', receiptMessageId: 'tool-receipt' });
+    const previousBinding = { ...binding, revalidationRequired: true };
+    f.patchGoal({ state: 'monitoring', binding: previousBinding,
+      pendingNode: 'a', pendingOutcome: 'uncertain', pendingPrompt: 'Previously submitted fixture' });
+    const tree = linkedConversation(ID, f.work_id, link);
+    const calls = [];
+    const deps = { nativeTransport: async req => {
+      calls.push(req.action || 'read');
+      assert.equal(req.path, '/backend-api/conversation/' + ID);
+      if (finalState === 'stopped') stopGoal(f.config, { work_id: f.work_id }, f.context);
+      else runWithToolActivity({ taskId: f.work_id }, () => requestCurrentTaskCancellation());
+      return { ok: true, data: await readConversationProjection(response(tree)) };
+    } };
+    await pollGoal(f.config, f.work_id, deps);
+    assert.equal(f.status().state, finalState, 'a late read cannot restore an active handoff');
+    assert.equal(f.status().goalActive, false);
+    assert.equal(f.status().chatLink.conversationUrl, undefined);
+    assert.equal(f.status().nextAttemptAt, undefined);
+    const settled = loadGoal(f.config, f.work_id);
+    assert.deepEqual(settled.binding, previousBinding);
+    assert.equal(settled.pendingNode, 'a');
+    assert.equal(settled.pendingOutcome, 'uncertain');
+    assert.equal(settled.pendingPrompt, 'Previously submitted fixture');
+    await pollGoal(f.config, f.work_id, deps);
+    assert.deepEqual(calls, ['read'], 'no further read or continuation is requested');
   });
 });
 
@@ -2081,6 +2326,36 @@ test('Goal begin avoids chat metadata reads and manual hints still require the a
       } });
       assert.equal(loadGoal(f.config, f.work_id).binding?.conversationId, ID, JSON.stringify(goalStatus(f.config, { work_id: f.work_id }, ctx)));
     } finally { configureGoalBrowserTransport(null); }
+  });
+});
+
+test('an inaccessible candidate expires without binding or bypassing transient account errors', async t => {
+  await withMonitoredGoal(t, async f => {
+    f.patchGoal({ binding: null, conversationId: '', observedNode: '', stableSince: 0 });
+    const context = { ...f.context, connector: true };
+    const link = ensureChatLink(f.config, f.work_id, context);
+    resumeGoal(f.config, { work_id: f.work_id, conversationUrl: 'https://chatgpt.com/c/' + OTHER }, context);
+    const fixture = discoveryFixture({ ordinary: [{ id: ID, update_time: Date.now() / 1000 }],
+      trees: { [ID]: linkedConversation(ID, f.work_id, link) } });
+    let status = 404;
+    const deps = { nativeTransport: async request => request.path === '/backend-api/conversation/' + OTHER
+      ? { ok: false, status } : fixture.transport(request) };
+    await pollGoal(f.config, f.work_id, deps);
+    assert.equal(loadGoal(f.config, f.work_id).conversationId, OTHER, 'allow the receipt grace period');
+    t.mock.timers.tick(5 * 60_000 + 1);
+    status = 503;
+    await pollGoal(f.config, f.work_id, deps);
+    assert.equal(loadGoal(f.config, f.work_id).conversationId, OTHER, 'a service outage is not evidence about a candidate');
+    t.mock.timers.tick(120_000);
+    status = 403;
+    await pollGoal(f.config, f.work_id, deps);
+    const expired = loadGoal(f.config, f.work_id);
+    assert.equal(expired.conversationId, '', 'inaccessible hint must not pin all future discovery');
+    assert.equal(expired.binding, null);
+    assert.deepEqual(fixture.requests, [], 'do not scan other chats in the rejecting poll');
+    t.mock.timers.tick(120_000);
+    await pollGoal(f.config, f.work_id, deps);
+    assert.equal(loadGoal(f.config, f.work_id).binding?.conversationId, ID, 'only a fresh exact receipt binds');
   });
 });
 
@@ -2384,6 +2659,31 @@ test('cached discovery survives transport restart but freshly rejects an off-bra
   });
 });
 
+test('public pending status distinguishes a failed fresh receipt check from an ordinary miss', async t => {
+  await withMonitoredGoal(t, async f => {
+    f.patchGoal({ binding: null, observedNode: '' });
+    const context = { ...f.context, connector: true };
+    const link = ensureChatLink(f.config, f.work_id, context);
+    const tree = linkedConversation(ID, f.work_id, link);
+    let reads = 0;
+    const deps = { nativeTransport: async () => {
+      if (++reads === 2) tree.mapping.a.parent = 'u';
+      return { ok: true, data: await readConversationProjection(response(tree)) };
+    } };
+    await pollGoal(f.config, f.work_id, deps);
+    const status = goalStatus(f.config, { work_id: f.work_id }, context);
+    assert.equal(status.chatLink.state, 'finding_chat');
+    assert.equal(status.chatLink.conversationUrl, undefined);
+    assert.match(status.error || '', /receipt.*not confirmed.*current branch/i);
+    assert.equal(reads, 2, 'diagnostics must not trigger another read');
+    t.mock.timers.tick(status.nextAttemptAt - Date.now());
+    await pollGoal(f.config, f.work_id, deps);
+    assert.equal(goalStatus(f.config, { work_id: f.work_id }, context).error, undefined,
+      'an ordinary subsequent miss must not retain the old verification diagnosis');
+    assert.equal(reads, 3);
+  });
+});
+
 test('duplicate ordinary and Project listings retain the Project association', async () => {
   const chat = rankedChat(1, 2000), link = { version: 1, link_id: 'q'.repeat(32) };
   const fixture = discoveryFixture({ ordinary: [chat],
@@ -2679,6 +2979,33 @@ test('new marker goals verify the newest chat before any Project catalogue scan'
     '/backend-api/conversation/' + chats[0].id,
     '/backend-api/conversation/' + chats[0].id
   ], 'first-chat match needs only catalogue head plus two fresh body checks');
+});
+
+test('a newest ordinary marker does not override fresh conflicting Project evidence', async t => {
+  await withMonitoredGoal(t, async f => {
+    const workId = f.work_id, link = { version: 1, link_id: 'p'.repeat(32) };
+    const ordinary = rankedChat(1, 3000), project = rankedChat(2, 2000);
+    const fixture = discoveryFixture({ ordinary: [ordinary], pages: [[projectPreview(1, [project])]],
+      trees: { [project.id]: linkedConversation(project.id, workId, link) } });
+    const store = goalDiscoveryStore(f.config, { owner: 'marker-conflict-fixture', tunnelId: 'fixture' });
+    let seeding = true;
+    const deps = { explicitGoal: true, discoveryStore: store, nativeTransport: async request => {
+      if (seeding && request.path.includes('/conversation/')) t.mock.timers.tick(2_000);
+      return fixture.transport(request);
+    } };
+    // A concurrent goal projected the Project receipt after the catalogue was fetched.
+    assert.equal((await findRecentGoalCommand({ ...deps, workId: 'another-work', linkId: 'q'.repeat(32) })).state, 'absent');
+    seeding = false;
+    const index = store.read();
+    t.mock.timers.tick(index.catalogue.at + 60_001 - Date.now());
+    assert.ok(Date.now() - index.evidence.find(item => item.id === project.id).at < 60_000);
+    const head = conversation(ordinary.id);
+    head.mapping.a.message.content.parts = [chatPairingMarker(workId, link.link_id)];
+    fixture.trees[ordinary.id] = head;
+    const result = await findRecentGoalCommand({ ...deps, workId, linkId: link.link_id, pairingMarkerEnabled: true });
+    assert.equal(result.state, 'ambiguous');
+    assert.equal(result.conversationId, undefined);
+  });
 });
 
 test('newest-chat marker miss falls back to newer Project conversation', async () => {

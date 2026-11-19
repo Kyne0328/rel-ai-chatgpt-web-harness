@@ -145,6 +145,8 @@ async function listHistoricalTaskChanges(config, context, liveFiles = []) {
   const live = new Set(liveFiles);
   const taskFiles = historicalTaskFiles(context).filter(file => !live.has(file));
   if (!taskFiles.length) return null;
+  // History retains a bounded path preview. This flag conveys completeness, never read authority.
+  const truncated = context.session.changedFilesTruncated === true;
   const historical = await historicalCommitContext(config, context, taskFiles);
   if (!historical.commitHeads.length) {
     return {
@@ -156,7 +158,7 @@ async function listHistoricalTaskChanges(config, context, liveFiles = []) {
       historyAvailable: false,
       commitHeads: [],
       commitSource: '',
-      truncated: false
+      truncated
     };
   }
 
@@ -173,7 +175,7 @@ async function listHistoricalTaskChanges(config, context, liveFiles = []) {
     historyAvailable: verifiedFiles.length > 0,
     commitHeads: historical.commitHeads,
     commitSource: historical.source,
-    truncated: false
+    truncated
   };
 }
 

@@ -11,6 +11,10 @@ import {
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
+function currentReleaseVersion() {
+  return JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version;
+}
+
 function parseArguments(argv) {
   const valueAfter = (name, fallback) => {
     const index = argv.indexOf(name);
@@ -34,13 +38,13 @@ function verifyPlatformUpdaterArtifacts(options) {
   if (!['win32', 'linux'].includes(platform)) {
     throw new Error('--platform must be win32 or linux.');
   }
-  const version = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version;
+  const version = currentReleaseVersion();
   const names = releaseArtifactNames(version);
   const expectedArtifact = platform === 'win32' ? names.installer : names.linuxAppImage;
   const metadata = platform === 'win32' ? names.metadata : names.linuxMetadata;
   const metadataPath = path.join(options.directory, metadata);
   requireFile(metadataPath, 'Updater metadata');
-  const references = parseLatestMetadata(fs.readFileSync(metadataPath, 'utf8'));
+  const references = parseLatestMetadata(fs.readFileSync(metadataPath, 'utf8'), version);
   if (references.length !== 1 || references[0].basename !== expectedArtifact) {
     throw new Error(`Updater metadata must reference only the canonical ${platform} artifact: ${expectedArtifact}.`);
   }
@@ -62,7 +66,7 @@ function verifyUpdaterArtifacts(options) {
   const checksumPath = path.join(options.directory, options.checksums);
   requireFile(metadataPath, 'Updater metadata');
   requireFile(checksumPath, 'SHA-256 manifest');
-  const references = parseLatestMetadata(fs.readFileSync(metadataPath, 'utf8'));
+  const references = parseLatestMetadata(fs.readFileSync(metadataPath, 'utf8'), currentReleaseVersion());
   const checksums = parseChecksumManifest(fs.readFileSync(checksumPath, 'utf8'));
 
   for (const reference of references) {

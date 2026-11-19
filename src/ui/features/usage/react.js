@@ -11,7 +11,7 @@ import { Icon } from '../../components/icons.js';
 import { Tooltip } from '../../components/tooltip.js';
 import { getRouteParams, getWorkspaceFilter, replaceRouteParams, routeHref } from '../../router.js';
 import { ANALYTICS_RANGES, analyticsBounds, workspaceOptions } from './range-model.js';
-import { loadAnalyticsData } from './data.js';
+import { loadAnalyticsData, subscribeAnalyticsReset } from './data.js';
 import { customDateDefaults, rangeButtonLabel } from './index.js';
 import { analyticsMetrics, failureCategoryLabel, formatChartValue, integer, pointMetric, timelineModel } from './render.js';
 
@@ -48,6 +48,8 @@ export function createUsageRoute(useDashboardSlices) {
     const [analytics, setAnalytics] = useState(null);
     const [refreshToken, setRefreshToken] = useState(0);
     const [status, setStatus] = useState('Loading analytics…');
+    const desktop = window.relaiDesktop;
+    const [resetRevision, setResetRevision] = useState(0);
     useEffect(() => {
       let active = true;
       const load = async () => {
@@ -55,7 +57,7 @@ export function createUsageRoute(useDashboardSlices) {
         setStatus('Loading analytics…');
         try {
           const bounds = analyticsBounds(range, { customStart: start, customEnd: end });
-          const result = await loadAnalyticsData({ desktop: window.relaiDesktop, bounds, workspace, fresh: refreshToken > 0 });
+          const result = await loadAnalyticsData({ desktop, bounds, workspace, fresh: refreshToken > 0 });
           if (!active) return;
           setAnalytics(result);
           setLoadState({ status: 'ready', message: '' });
@@ -69,7 +71,11 @@ export function createUsageRoute(useDashboardSlices) {
       void load();
       // Monthly requests are shared by the data layer; retire only this consumer.
       return () => { active = false; };
-    }, [range, start, end, workspace, refreshToken]);
+    }, [desktop, range, start, end, workspace, refreshToken, resetRevision]);
+    useEffect(() => subscribeAnalyticsReset(desktop, () => {
+      setAnalytics(null);
+      setResetRevision(value => value + 1);
+    }), [desktop]);
 
     useEffect(() => {
       const syncFromRoute = () => {

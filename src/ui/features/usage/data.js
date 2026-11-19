@@ -1,8 +1,28 @@
 import { analyticsBounds, analyticsMonths, analyticsRangeScope, normalizeUsageSnapshot } from './range-model.js';
 
 const usageRequestsByDesktop = new WeakMap();
+const resetListeners = new WeakMap();
 const USAGE_CACHE_TTL_MS = 15_000;
 const MAX_CACHED_MONTHS = 8;
+
+export function subscribeAnalyticsReset(desktop, listener) {
+  if (!desktop) return () => {};
+  let listeners = resetListeners.get(desktop);
+  if (!listeners) resetListeners.set(desktop, listeners = new Set());
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+// Called after the user confirms the Settings reset.
+export async function clearDashboardAnalytics(desktop, performReset) {
+  const result = await performReset();
+  if (desktop && (result?.ok || result?.outcomeUnknown)) {
+    // Detach the entire generation so an earlier monthly read cannot refill it.
+    usageRequestsByDesktop.delete(desktop);
+    for (const notify of resetListeners.get(desktop) || []) notify();
+  }
+  return result;
+}
 
 function loadUsageMonth(desktop, month, fresh = false) {
   let months = usageRequestsByDesktop.get(desktop);
@@ -17,6 +37,7 @@ function loadUsageMonth(desktop, month, fresh = false) {
   const entry = { request: null, value: cached?.value || null, savedAt: cached?.savedAt || 0 };
   const request = Promise.resolve().then(() => desktop.getLocalUsage(month))
     .then(snapshot => {
+      if (usageRequestsByDesktop.get(desktop) !== months) return loadUsageMonth(desktop, month);
       const value = normalizeUsageSnapshot(snapshot, month);
       entry.value = value;
       entry.savedAt = Date.now();

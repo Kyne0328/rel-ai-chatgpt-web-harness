@@ -21,6 +21,9 @@ const webContentsEvents = new Map();
 const originalWriteFile = fs.promises.writeFile;
 let dashboardAuthGeneration = 1;
 let dashboardBootstrap = 'one-time-code';
+let dashboardPort = 3333;
+let bootstrapCalls = 0;
+let holdNextBootstrap = null;
 let appQuitCount = 0;
 const workArea = { x: 0, y: 0, width: 1366, height: 728 };
 const fakeScreen = {
@@ -52,6 +55,7 @@ class FakeWindow {
       setWindowOpenHandler(listener) { openHandler = listener; },
       sent: [],
       getURL: () => this.webContents.url,
+      isCrashed: () => this.crashed === true,
       reload: () => { this.reloaded = true; },
       executeJavaScript: async source => {
         this.executedScripts.push(source);
@@ -93,6 +97,7 @@ class FakeWindow {
   isMinimized() { return this.minimized; }
   isFullScreen() { return this.fullScreen; }
   minimize() { this.minimized = true; this.emit('minimize'); }
+  restore() { this.minimized = false; this.emit('restore'); }
   maximize() { this.maximized = true; this.minimized = false; this.emit('maximize'); }
   unmaximize() { this.maximized = false; this.emit('unmaximize'); }
   setTitleBarOverlay(options) { this.titleBarOverlay = options; }
@@ -123,10 +128,16 @@ const dependencies = {
   platform: 'win32',
   isQuitting: () => false,
   onLoadError: error => { dashboardLoadError = error; },
-  getConnection: async () => ({
-    url: `http://127.0.0.1:3333/dashboard?surface=desktop&bootstrap=${dashboardBootstrap}`,
-    authGeneration: dashboardAuthGeneration
-  })
+  getConnectionIdentity: () => dashboardPort ? { origin: `http://127.0.0.1:${dashboardPort}`, authGeneration: dashboardAuthGeneration } : null,
+  getConnection: async () => {
+    bootstrapCalls++;
+    const wait = holdNextBootstrap;
+    holdNextBootstrap = null;
+    if (wait) await wait;
+    if (!dashboardPort) throw new Error('Local service is not running.');
+    return { url: `http://127.0.0.1:${dashboardPort}/dashboard?surface=desktop&bootstrap=${dashboardBootstrap}`,
+      authGeneration: dashboardAuthGeneration };
+  }
 };
 
 try {
@@ -170,11 +181,26 @@ try {
   const pendingRouteOpen = routeManager.open();
   await routeWaitStarted;
   const unreadyWindow = routeManager.getWindow();
+  const repeatOpen = routeManager.open();
   unreadyWindow.emit('ready-to-show');
   assert.notEqual(unreadyWindow.shown, true, 'an HTML-loaded but unrendered React route must remain hidden');
   finishRouteLoad(true);
-  await pendingRouteOpen;
+  assert.equal(await repeatOpen, await pendingRouteOpen);
   assert.equal(unreadyWindow.shown, true, 'first usable route content should reveal the window without an animation delay');
+  routeManager.requestClose();
+  const newDocument = () => webContentsEvents.get('did-start-navigation')({ isMainFrame: true, isSameDocument: false });
+  newDocument();
+  const checkingReload = new Promise(resolve => { unreadyWindow.onDashboardReadinessWait = resolve; });
+  unreadyWindow.dashboardReadyPromise = new Promise(resolve => { finishRouteLoad = resolve; });
+  const supersededOpen = routeManager.open();
+  await checkingReload;
+  newDocument();
+  finishRouteLoad(true);
+  await assert.rejects(supersededOpen, /document changed/);
+  assert.equal(unreadyWindow.isVisible(), false, 'readiness from the previous document must not reveal its replacement');
+  assert.equal(unreadyWindow.destroyed, false, 'a replacement document can still become ready and must not be discarded');
+  await routeManager.open();
+  assert.equal(unreadyWindow.isVisible(), true);
   await routeManager.close();
   // Evaluate the production readiness predicate: a shell with its lazy-route
   // loading skeleton is not ready; the first committed route is.
@@ -257,6 +283,44 @@ try {
   permissionHandler(null, 'camera', value => { permissionAllowed = value; });
   assert.equal(permissionAllowed, false);
 
+  // A plain activation must synchronously restore the *same authenticated document*.
+  // Neither a fresh bootstrap nor a readiness probe in a throttled renderer may gate it.
+  win.webContents.url = 'http://127.0.0.1:3333/dashboard?surface=desktop#activity';
+  manager.requestClose();
+  manager.minimize();
+  const warmBootstraps = bootstrapCalls;
+  const warmScripts = win.executedScripts.length;
+  const warmLoads = win.loadCount;
+  const warmOpen = manager.open();
+  assert.equal(win.isVisible(), true, 'native show must be dispatched before yielding on warm reopen');
+  assert.equal(win.isMinimized(), false, 'tray activation must restore a minimized native window');
+  assert.equal(await warmOpen, win);
+  assert.equal(bootstrapCalls, warmBootstraps);
+  assert.equal(win.executedScripts.length, warmScripts);
+  assert.equal(win.loadCount, warmLoads);
+  assert.equal(new URL(win.webContents.url).hash, '#activity');
+
+  // A same-origin document reload loses readiness even if the URL never changes.
+  manager.requestClose();
+  webContentsEvents.get('did-start-navigation')({ isMainFrame: true, isSameDocument: false });
+  const reloadedOpen = manager.open();
+  assert.equal(win.isVisible(), false);
+  await reloadedOpen;
+  assert.equal(bootstrapCalls, warmBootstraps + 1);
+  assert.equal(win.executedScripts.length, warmScripts + 1);
+
+  manager.requestClose();
+  dashboardPort = 0;
+  await assert.rejects(manager.open(), /not running/);
+  assert.equal(win.isVisible(), false, 'an unavailable service must not expose the retained dashboard');
+  dashboardPort = 4444;
+  const movedOpen = manager.open();
+  assert.equal(win.isVisible(), false, 'a different listener must authenticate before restore');
+  await movedOpen;
+  assert.equal(new URL(win.webContents.url).port, '4444');
+  dashboardPort = 3333;
+  await manager.open();
+
   const navigation = webContentsEvents.get('will-navigate');
   let prevented = false;
   navigation({ preventDefault() { prevented = true; } }, 'https://example.com/docs');
@@ -287,7 +351,10 @@ try {
   dashboardAuthGeneration += 1;
   dashboardBootstrap = 'post-restart-code';
   const beforeAuthRefresh = win.loadCount;
-  const refreshedAfterRestart = await manager.open();
+  manager.requestClose();
+  const restartOpen = manager.open();
+  assert.equal(win.isVisible(), false, 'a new auth generation must not synchronously expose an old session');
+  const refreshedAfterRestart = await restartOpen;
   assert.equal(refreshedAfterRestart, win);
   assert.equal(win.loadCount, beforeAuthRefresh + 1, 'a new local-service auth generation must reload the one-time dashboard bootstrap');
   assert.equal(new URL(win.webContents.url).searchParams.get('bootstrap'), 'post-restart-code');
@@ -298,10 +365,36 @@ try {
 
   dashboardBootstrap = 'session-refresh-code';
   const beforeSessionRefresh = win.loadCount;
-  await manager.open('', { forceReload: true });
+  manager.requestClose();
+  const forcedOpen = manager.open('', { forceReload: true });
+  const activationDuringRefresh = manager.open();
+  assert.equal(win.isVisible(), false, 'ordinary activation must not race an in-flight reauthentication');
+  await Promise.all([forcedOpen, activationDuringRefresh]);
   assert.equal(win.loadCount, beforeSessionRefresh + 1, 'session reauthentication must consume a fresh bootstrap even within the same service generation');
   assert.equal(new URL(win.webContents.url).searchParams.get('bootstrap'), 'session-refresh-code');
   assert.equal(win.webContents.url.endsWith('#settings/connection'), true, 'session reauthentication must preserve the active dashboard route');
+
+  manager.requestClose();
+  let allowBootstrap;
+  holdNextBootstrap = new Promise(resolve => { allowBootstrap = resolve; });
+  const forceFirst = manager.open('', { forceReload: true });
+  const settingsNext = manager.open('#settings');
+  const trayLast = manager.open();
+  await new Promise(setImmediate);
+  assert.equal(win.isVisible(), false, 'explicit Settings must not reveal an expired document while bootstrap is pending');
+  allowBootstrap();
+  await Promise.all([forceFirst, settingsNext, trayLast]);
+  assert.equal(new URL(win.webContents.url).hash, '#settings', 'queued explicit navigation must be honored after authentication');
+
+  await manager.open('', { forceReload: true }); // visible reload has no readiness proof
+  manager.requestClose();
+  const afterVisibleReload = manager.open();
+  assert.equal(win.isVisible(), false);
+  await afterVisibleReload;
+  manager.requestClose();
+  const requalified = manager.open();
+  assert.equal(win.isVisible(), true, 'first gated reopen requalifies the reloaded document for synchronous restores');
+  await requalified;
 
   assert.deepEqual(manager.getState(), {
     platform: 'win32', customTitleBar: true, controls: 'native',

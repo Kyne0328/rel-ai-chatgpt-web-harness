@@ -21,29 +21,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Validate version
-        env:
-          VERSION: ${{ inputs.version }}
-        run: |
-          set -euo pipefail
-          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "version must be a stable semantic version such as 1.1.3" >&2
-            exit 2
-          fi
-      - name: Verify candidate assets
+      - name: Check out promotion policy
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Verify and promote candidate
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
-        run: |
-          set -euo pipefail
-          assets="$(gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease,assets)"
-          test "$(jq -r '.isDraft' <<<"$assets")" = "false"
-          test "$(jq -r '.isPrerelease' <<<"$assets")" = "true"
-          for required in "latest.yml" "latest-linux.yml" "latest-mac.yml" "SHA256SUMS.txt"; do
-            jq -e --arg name "$required" '.assets[] | select(.name == $name)' <<<"$assets" >/dev/null
-          done
-      - name: Promote stable release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ inputs.version }}
-        run: gh release edit "$VERSION" --repo "$GITHUB_REPOSITORY" --prerelease=false --latest
+        run: node scripts/promote-release.mjs "$VERSION"

@@ -70,6 +70,25 @@ async function case_desktop_lifecycle_unit() {
     path: process.execPath,
     args: ['--background']
   });
+  // Native registration is synchronous but the void setter can silently fail.
+  {
+    let readback = 'unchanged';
+    const registrar = createDesktopLifecycleManager({ app: { ...app,
+      setLoginItemSettings() {},
+      getLoginItemSettings() {
+        if (readback === 'unavailable') throw new Error('fixture registry unavailable');
+        return { openAtLogin: readback === 'unchanged' };
+      }
+    }, platform: 'win32', env: {}, connectorRevision: 'surface-a' });
+    const ignored = registrar.setLaunchAtLogin(false);
+    assert.equal(ignored.ok, false, 'a still-enabled registration must block callers such as logout-and-clear');
+    assert.equal(ignored.status.launchAtLogin.enabled, true);
+    readback = 'unavailable';
+    assert.equal(registrar.setLaunchAtLogin(false).errorCode, 'startup_setting_failed',
+      'an unavailable readback is not proof of disabled startup');
+    readback = 'disabled';
+    assert.equal(registrar.setLaunchAtLogin(false).ok, true, 'retry succeeds once the requested state is confirmed');
+  }
   assert.equal((await first.setKeepAwake(true)).status.keepAwake, true);
   const preferenceUpdate = await first.setPreferences({
     keepRunningOnClose: false,
@@ -1322,12 +1341,13 @@ async function case_computer_helper_containment() {
   }
 
   const children = [];
-  function spawnFake({ responds = false, confirms = true } = {}) {
+  function spawnFake({ responds = false, confirms = true, onRequest } = {}) {
     const child = new EventEmitter();
     Object.assign(child, { exitCode: null, signalCode: null, killed: false, kills: 0, stdout: new PassThrough(), stderr: new PassThrough() });
     child.stdin = new Writable({ write(chunk, _encoding, callback) {
       const request = JSON.parse(String(chunk));
       child.lastRequest = request;
+      onRequest?.(child, request);
       if (responds) setTimeout(() => child.stdout.write(JSON.stringify({ id: request.id, ok: true, result: { candidates: [candidate], truncated: false } }) + '\n'), 5);
       callback();
     } });
@@ -1361,6 +1381,38 @@ async function case_computer_helper_containment() {
   setTimeout(() => warmAbort.abort(new Error('warmup cancelled')), 10);
   await assert.rejects(() => observing, error => /warmup cancelled/.test(error.message) && error.terminationConfirmed === true);
   assert.equal((await backgroundWarmup).terminationConfirmed, true, 'foreground cancellation must contain shared background warmup');
+  for (const action of ['activate', 'set_value']) {
+    const target = { targetId: 'e1', source: 'uia', role: 'Button', name: 'Fixture',
+      displayId: 'main', x: 0, y: 0, width: 5, height: 5, centerX: 2, centerY: 2, automationId: 'f', className: 'Button' };
+    const posted = Promise.withResolvers();
+    const writes = [];
+    const instance = createWindowsUiaAdapter({ platform: 'win32', spawnProcess: () => spawnFake({
+      confirms: false, onRequest(child, request) {
+        writes.push(request.action);
+        if (request.action === 'warmup') queueMicrotask(() => child.stdout.write(
+          JSON.stringify({ id: request.id, ok: true, result: { supported: true, available: true } }) + '\n'));
+        else posted.resolve({ child, request });
+      }
+    }) });
+    const submit = signal => action === 'activate' ? instance.activate('notes', target, 5, 'semantic', signal, initial)
+      : instance.setValue('notes', target, 'fixture', 5, signal, initial);
+    await assert.rejects(submit(AbortSignal.abort(new Error('before dispatch'))), /before dispatch/);
+    assert.deepEqual(writes, [], 'already-cancelled input must never reach the helper');
+    const controller = new AbortController();
+    const outcome = submit(controller.signal).then(value => ({ value }), error => ({ error }));
+    const { child, request } = await posted.promise;
+    assert.equal(request.appTarget.windowId, initial.windowId);
+    controller.abort(new Error('cancel after dispatch'));
+    assert.equal(child.kills, 1, 'abort must contain the owned helper even after an input was sent');
+    child.stdout.write(JSON.stringify({ id: request.id, ok: true, result: { handled: true } }) + '\n');
+    child.signalCode = 'SIGKILL';
+    child.emit('exit', null, 'SIGKILL');
+    const { error } = await outcome;
+    assert.equal(error?.terminationConfirmed, true);
+    assert.equal(error?.outcomeUnknown, true, 'confirmed helper exit does not roll back already-sent input');
+    assert.match(error.message, /may already have taken effect/);
+    assert.deepEqual(writes, ['warmup', action], 'a lost acknowledgment must not replay input');
+  }
   const stuck = createWindowsUiaAdapter({ platform: 'win32', timeoutMs: 500, spawnProcess: () => spawnFake({ confirms: false }) });
   await assert.rejects(() => stuck.resolveAppTarget('notes'), error => error.terminationConfirmed === false);
   const spawned = children.length;

@@ -7,7 +7,7 @@ import { readDeveloperOptionsUnlocked } from '../../developer-options.js';
 import { Icon } from '../../components/icons.js';
 import { toast } from '../../components/toast.js';
 import { formatDuration, timeAgo } from '../../utils.js';
-import { getRouteParams, getRouteSnapshot, getWorkspaceFilter, navigate, replaceRouteParams, routeHref, setWorkspaceFilter, subscribeRoute } from '../../router.js';
+import { getRouteParams, getRouteSnapshot, getWorkspaceFilter, replaceRouteParams, routeHref, setWorkspaceFilter, subscribeRoute } from '../../router.js';
 import { activityEventId } from '../../activity-event.js';
 import { orderWorkspacesAlphabetically } from '../../components/workspace-menu.js';
 import { eventTimestampValue } from '../../../taskEvents.js';
@@ -18,7 +18,9 @@ import { statusPillClass } from '../../status-tone.js';
 import { processListView } from '../processes/index.js';
 import { ProcessRow, useProcessMemory } from '../processes/react.js';
 import {
+  formatTaskHandoffBrief,
   isOngoingSession,
+  linkedChatgptUrl,
   goalModeNotice,
   mergeSessionDetail,
   mergeSessionEvents,
@@ -32,6 +34,7 @@ import {
   sessionIdentifier,
   sessionListTimestampValue,
   sessionNeedsAttention,
+  recordedValidationStatus,
   sessionsForDisplay,
   taskControlMessage,
   taskProcessGroups,
@@ -47,7 +50,13 @@ const SESSION_PAGE_SIZE = 50;
 const MOBILE_SESSION_PAGE_SIZE = 12;
 const MOBILE_SESSION_QUERY = '(max-width: 760px)';
 
-function chatLinkLabel(goal) {
+const MANUAL_CHAT_HANDOFF = 'Use Copy task brief, then paste it into the ChatGPT conversation you choose.';
+
+function chatLinkLabel(goal, verifiedUrl) {
+  const state = goal.chatLink?.state;
+  if (!state || state === 'inactive' || (state === 'linked' && !verifiedUrl)) {
+    return 'No verified ChatGPT conversation link is available for this task.';
+  }
   const labels = { finding_chat: 'Finding the ChatGPT conversation…', linked: 'ChatGPT conversation linked.',
     waiting_for_account: 'Chat linking is waiting for ChatGPT sign-in.', rate_limited: 'Chat linking is waiting for the account cooldown.',
     conflicting_matches: 'Multiple chats contain this task receipt. Automatic linking is paused.',
@@ -75,11 +84,12 @@ function SessionsPage({ data = {} }) {
   const route = useSyncExternalStore(subscribeRoute, getRouteSnapshot, getRouteSnapshot);
   const routeParams = useMemo(() => new URLSearchParams(route.search), [route.search]);
   const workspace = getWorkspaceFilter();
-  const scopeKey = workspace || '__all__';
+  const scopeKey = workspace;
   const requestedId = String(getRouteParams().get('task') || '').trim();
   const [olderSessions, setOlderSessions] = useState([]);
-  const [historyAvailability, setHistoryAvailability] = useState(() => new Map());
-  const [historyLoadingScope, setHistoryLoadingScope] = useState('');
+  const [historyPages, setHistoryPages] = useState(() => new Map());
+  const historyRequests = useRef(new Set());
+  const [historyLoadingScopes, setHistoryLoadingScopes] = useState(() => new Set());
   const taskSource = useMemo(
     () => mergeTaskSources(olderSessions, Array.isArray(data.tasks) ? data.tasks : []),
     [data.tasks, olderSessions]
@@ -105,13 +115,13 @@ function SessionsPage({ data = {} }) {
   const visibleCount = Math.max(minimumVisible, Number(visibleByScope.get(scopeKey) || pageSize));
   const visibleSessions = sessions.slice(0, visibleCount);
   const remaining = Math.max(0, sessions.length - visibleSessions.length);
-  const knownHistoryAvailability = historyAvailability.get(scopeKey);
+  const knownHistoryAvailability = historyPages.get(scopeKey)?.hasMore;
   const canLoadOlder = knownHistoryAvailability !== undefined
     ? knownHistoryAvailability
     : workspace
       ? true
       : taskSource.length >= 100;
-  const loadingOlder = historyLoadingScope === scopeKey;
+  const loadingOlder = historyLoadingScopes.has(scopeKey);
   const openTaskCount = allSessions.reduce((count, session) => {
     const state = workSessionStateView(session);
     return count + (state.active === true || state.open === true ? 1 : 0);
@@ -191,7 +201,7 @@ function SessionsPage({ data = {} }) {
       return undefined;
     }
     let cancelled = false;
-    setHydrationState(previous => previous?.id === selectedId && previous.status === 'ready'
+    setHydrationState(previous => !forceRefresh && previous?.id === selectedId && previous.status === 'ready'
       ? previous : { id: selectedId, status: 'loading' });
     void fetchJson(`${TASK_SESSION_URL}?task=${encodeURIComponent(selectedId)}${summary ? '&activityOnly=1' : ''}`, {
       cacheTtlMs: selectedHydrationCacheTtl,
@@ -296,23 +306,36 @@ function SessionsPage({ data = {} }) {
   }, [pageSize, scopeKey, visibleCount]);
 
   const loadOlderTasks = useCallback(async () => {
-    if (historyLoadingScope) return;
-    setHistoryLoadingScope(scopeKey);
+    const pending = historyRequests.current;
+    if (pending.has(scopeKey)) return;
+    pending.add(scopeKey);
+    setHistoryLoadingScopes(new Set(pending));
     try {
-      const params = new URLSearchParams({ limit: String(TASK_HISTORY_PAGE_SIZE) });
-      if (workspace) params.set('workspace', workspace);
-      const cursor = taskHistoryCursor(allSessions);
-      if (cursor) params.set('cursor', JSON.stringify(cursor));
-      const response = await fetchJson(`${TASK_HISTORY_URL}?${params.toString()}`, { pauseTimeoutWhenHidden: false });
-      if (response?.ok === false || !Array.isArray(response?.tasks)) {
-        throw new Error(response?.error || 'Task history could not be loaded.');
+      const loadedIds = new Set(allSessions.map(sessionIdentifier));
+      const received = [];
+      let cursor = historyPages.get(scopeKey)?.nextCursor || null;
+      let page;
+      // Live summaries and pages loaded under another filter are display data,
+      // not a cursor. Begin with this query's canonical page. When it merely
+      // overlaps the bootstrap, take one further page for the same button press.
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const params = new URLSearchParams({ limit: String(TASK_HISTORY_PAGE_SIZE) });
+        if (workspace) params.set('workspace', workspace);
+        if (cursor) params.set('cursor', JSON.stringify(cursor));
+        const response = await fetchJson(`${TASK_HISTORY_URL}?${params.toString()}`, { pauseTimeoutWhenHidden: false });
+        if (response?.ok === false || !Array.isArray(response?.tasks)) {
+          throw new Error(response?.error || 'Task history could not be loaded.');
+        }
+        page = response.page || {};
+        if (page.hasMore && (!page.nextCursor || JSON.stringify(page.nextCursor) === JSON.stringify(cursor))) {
+          throw new Error('Task history did not return a new continuation. Try again.');
+        }
+        received.push(...response.tasks);
+        if (!page.hasMore || response.tasks.some(task => !loadedIds.has(sessionIdentifier(task)))) break;
+        cursor = page.nextCursor;
       }
-      setOlderSessions(previous => mergeTaskSources(previous, response.tasks));
-      setHistoryAvailability(previous => {
-        const next = new Map(previous);
-        next.set(scopeKey, response?.page?.hasMore === true);
-        return next;
-      });
+      setOlderSessions(previous => mergeTaskSources(previous, received));
+      setHistoryPages(previous => new Map(previous).set(scopeKey, page));
       setVisibleByScope(previous => {
         const next = new Map(previous);
         next.set(scopeKey, Math.max(Number(next.get(scopeKey) || pageSize), visibleCount + pageSize));
@@ -321,9 +344,10 @@ function SessionsPage({ data = {} }) {
     } catch (error) {
       toast(error instanceof Error ? error.message : String(error), { variant: 'error' });
     } finally {
-      setHistoryLoadingScope('');
+      pending.delete(scopeKey);
+      setHistoryLoadingScopes(new Set(pending));
     }
-  }, [allSessions, historyLoadingScope, pageSize, scopeKey, visibleCount, workspace]);
+  }, [allSessions, historyPages, pageSize, scopeKey, visibleCount, workspace]);
 
   const showMore = useCallback(() => {
     if (remaining > 0) {
@@ -442,7 +466,8 @@ function SessionsPage({ data = {} }) {
                 setActiveTab: selectTab,
                 activityHasMore: hydrated?.id === selectedId && hydrated?.activity?.hasMore === true,
                 onLoadMoreActivity: loadMoreActivity,
-                onControlComplete: refreshSelectedSession,
+                onRefreshDetail: refreshSelectedSession,
+                refreshingDetail: hydrationState?.id === selectedId && hydrationState.status === 'loading',
                 managedProcesses: data.managedProcesses || [],
                 commandOperations: data.commandOperations || [],
                 requestedFilePath: routeParams.get('file') || ''
@@ -517,21 +542,6 @@ function mergeTaskSources(existing = [], incoming = []) {
   return [...byId.values()];
 }
 
-function taskHistoryCursor(sessions = []) {
-  let candidate = null;
-  for (const session of sessions) {
-    const updatedAtMs = Math.max(0, Number(session?.historyUpdatedAtMs || 0));
-    const id = sessionIdentifier(session);
-    if (!updatedAtMs || !id) continue;
-    if (!candidate
-      || updatedAtMs < candidate.updatedAtMs
-      || (updatedAtMs === candidate.updatedAtMs && id > candidate.id)) {
-      candidate = { updatedAtMs, id };
-    }
-  }
-  return candidate;
-}
-
 function ProjectFilter({ workspaces = [], selected = '' }) {
   const options = orderWorkspacesAlphabetically(workspaces);
   return h('label', { className: 'filter-field' },
@@ -593,7 +603,7 @@ function SessionTime({ session, live }) {
   return h('span', end ? { 'data-clock-relative': end } : null, timeAgo(end) || '—');
 }
 
-function SessionInspector({ session, activeTab, setActiveTab, activityHasMore, onLoadMoreActivity, onControlComplete, managedProcesses = [], commandOperations = [], requestedFilePath = '' }) {
+function SessionInspector({ session, activeTab, setActiveTab, activityHasMore, onLoadMoreActivity, onRefreshDetail, refreshingDetail = false, managedProcesses = [], commandOperations = [], requestedFilePath = '' }) {
   const headingRef = useRef(null);
   const previousId = useRef('');
   const id = sessionIdentifier(session);
@@ -669,24 +679,23 @@ function SessionInspector({ session, activeTab, setActiveTab, activityHasMore, o
       toast(message, { variant: result.processCleanup?.complete === false ? 'warn' : 'success' });
       requestDashboardRefresh();
       // Off-page tasks may remain absent from the refreshed summary list.
-      onControlComplete?.(id);
+      onRefreshDetail?.(id);
     } catch (error) {
       toast(error instanceof Error ? error.message : String(error), { variant: 'error' });
     } finally {
       setControlKey('');
     }
-  }, [id, onControlComplete]);
+  }, [id, onRefreshDetail]);
 
-  const openLinkedChat = async () => {
-    setControlKey('open_chat');
+  const chatUrl = linkedChatgptUrl(session);
+  const chatState = session.goalMode?.chatLink?.state;
+  const waitingForChat = ['finding_chat', 'waiting_for_account', 'rate_limited'].includes(chatState);
+  const manualHandoff = !chatUrl && (!chatState || ['inactive', 'linked', 'needs_attention', 'conflicting_matches'].includes(chatState));
+  const copyHandoff = async () => {
     try {
-      const result = await window.relaiDesktop.browser.goalLoginStart({
-        tunnelId: session.goalMode.tunnelId, conversationId: session.goalMode.conversationId
-      });
-      if (result?.ok === false) throw new Error(result.error || 'The linked chat could not be opened.');
-      navigate('browser');
+      await copyText(formatTaskHandoffBrief(session));
+      toast('Task brief copied.', { variant: 'success' });
     } catch (error) { toast(error instanceof Error ? error.message : String(error), { variant: 'error' }); }
-    finally { setControlKey(''); }
   };
 
   const ownedProcessCount = taskProcessGroups(managedProcesses, id, session.workspace).owned.length;
@@ -710,6 +719,9 @@ function SessionInspector({ session, activeTab, setActiveTab, activityHasMore, o
       ),
       h('div', { className: 'task-detail-header-actions' },
         h(StatusPill, { state }),
+        h('button', { className: 'secondary compact-button', type: 'button', 'data-copy-handoff': '',
+          title: 'Copy the work ID, status, plan progress and recorded validation. Nothing is sent.',
+          onClick: () => { void copyHandoff(); } }, h(Icon, { name: 'copy', size: 14 }), 'Copy task brief'),
         goalSignInAvailable ? h('a', { href: routeHref('settings/application', { tunnel: session.goalMode.tunnelId }), className: 'buttonlike secondary' }, 'Sign in to ChatGPT') : null,
         activeGoal ? h('button', {
           className: 'secondary', type: 'button', 'data-stop-goal': '',
@@ -741,12 +753,15 @@ function SessionInspector({ session, activeTab, setActiveTab, activityHasMore, o
         live ? h('strong', null, currentTitle) : null,
         h('span', null, currentCopy)
       ),
-      session.goalMode?.chatLink && session.goalMode.chatLink.state !== 'inactive' ? h('div', { className: 'detail-stack', 'data-chat-link': '' },
-        h('p', { role: 'status' }, chatLinkLabel(session.goalMode)),
-        session.goalMode.chatLink.state === 'linked' && session.goalMode.tunnelId
-          && typeof window.relaiDesktop?.browser?.goalLoginStart === 'function'
-          ? h('button', { type: 'button', className: 'secondary', disabled: Boolean(controlKey),
-            onClick: () => { void openLinkedChat(); } }, controlKey === 'open_chat' ? 'Opening…' : 'Open linked chat') : null,
+      session.goalMode ? h('div', { className: 'detail-stack', 'data-chat-link': '' },
+        h('p', { role: 'status' }, chatLinkLabel(session.goalMode, chatUrl)),
+        waitingForChat && onRefreshDetail ? h('button', { className: 'secondary compact-button', type: 'button',
+          'data-refresh-chat-link': '', disabled: refreshingDetail, onClick: () => onRefreshDetail(id),
+          title: 'Recheck the saved link for this task. Nothing is sent to ChatGPT.' },
+        refreshingDetail ? 'Refreshing chat link…' : 'Refresh chat link') : null,
+        manualHandoff ? h('p', { className: 'task-detail-note' }, MANUAL_CHAT_HANDOFF) : null,
+        chatUrl ? h('a', { href: chatUrl, target: '_blank', rel: 'noopener noreferrer',
+          className: 'buttonlike secondary', title: 'Open the verified conversation in your browser.' }, 'Open in ChatGPT') : null,
         !session.goalMode.goalActive && session.goalMode.error
           ? h('p', { className: 'connection-notice', role: 'status' }, session.goalMode.error) : null
       ) : null,
@@ -795,7 +810,7 @@ function SessionInspector({ session, activeTab, setActiveTab, activityHasMore, o
 }
 
 function TaskDetailsSection({ session, state, fileCounts }) {
-  const conversationId = session.goalMode?.conversationId || session.correlation?.conversationId || '';
+  const conversationId = linkedChatgptUrl(session) ? session.goalMode.conversationId : '';
   const createdAt = session.startedAtIso || session.createdAt || session.startedAt;
   const finishedAt = session.completedAt || session.cancelledAt || session.endedAt || session.inactiveAt;
   const dateLabel = value => {
@@ -811,7 +826,8 @@ function TaskDetailsSection({ session, state, fileCounts }) {
       h('div', { className: 'task-identifier-rows', 'data-task-identifiers': '' },
         h(TaskIdentifier, { label: 'Work ID', value: sessionIdentifier(session) }),
         conversationId ? h(TaskIdentifier, { label: 'Conversation ID', value: conversationId })
-          : h('p', { className: 'task-detail-note' }, 'No verified ChatGPT conversation ID is recorded for this task.')
+          : h('p', { className: 'task-detail-note' }, 'No verified ChatGPT conversation ID is recorded for this task.',
+            session.goalMode ? ' ' + MANUAL_CHAT_HANDOFF : '')
       )
     ),
     h('section', { className: 'task-detail-section' },
@@ -1034,8 +1050,9 @@ function AttentionSection({ session }) {
   if (!sessionNeedsAttention(session)) return null;
   const items = [];
   const failures = Number(session.failures || session.failedToolCallCount || 0);
-  if (failures) items.push(`${failures} tool call${failures === 1 ? '' : 's'} failed`);
-  if (session.validation === 'failed' || session.status === 'validation_failed') items.push('Checks failed');
+  if (failures && workSessionStateView(session).status !== 'completed') items.push(`${failures} tool call${failures === 1 ? '' : 's'} failed`);
+  if (recordedValidationStatus(session) === 'stale') items.push('Validation is out of date. Recheck the current files before relying on this result.');
+  else if (session.validation === 'failed' || session.status === 'validation_failed') items.push('Checks failed');
   if (session.status === 'blocked') items.push(session.endReason || workSessionStateView(session).label);
   if (session.status === 'failed') items.push(session.endReason || 'The task ended with an unresolved problem');
   return h('section', { className: 'task-detail-section task-detail-problems' },
@@ -1046,8 +1063,8 @@ function AttentionSection({ session }) {
 
 function FailureHistorySection({ session }) {
   const failures = Number(session.failures || session.failedToolCallCount || 0);
-  if (!failures || sessionNeedsAttention(session)) return null;
   const completed = workSessionStateView(session).status === 'completed';
+  if (!failures || (!completed && sessionNeedsAttention(session))) return null;
   const label = completed
     ? `${failures} recovered tool-call failure${failures === 1 ? '' : 's'}`
     : `${failures} earlier tool-call failure${failures === 1 ? '' : 's'}`;

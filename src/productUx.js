@@ -134,10 +134,16 @@ function setupWizard(args = {}) {
     config,
     nextCommands: [
       "npm run init-config",
-      workspacePath ? `npm run workspace:add -- ${alias} ${workspacePath}` : "npm run workspace:add -- myapp /absolute/path/to/project",
+      workspacePath ? `npm run workspace:add -- ${setupArgument(alias)} ${setupArgument(workspacePath)}` : "npm run workspace:add -- myapp /absolute/path/to/project",
       startCmd
     ]
   };
+}
+
+// The wizard emits PowerShell on Windows and POSIX shell commands elsewhere.
+function setupArgument(value) {
+  const quoted = process.platform === 'win32' ? value.replaceAll("'", "''") : value.replaceAll("'", "'\\''");
+  return `'${quoted}'`;
 }
 
 function setupStartCommand(token) {

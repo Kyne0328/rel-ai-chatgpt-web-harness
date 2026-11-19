@@ -160,13 +160,17 @@ function createFairResourceScheduler(limits = {}, {
     const deadlineAtMs = Math.min(queuedAt + timeoutMs,
       Number.isFinite(requestedDeadline) && requestedDeadline > 0 ? requestedDeadline : Infinity);
     if (deadlineAtMs <= queuedAt) return Promise.reject(resourceQueueTimeoutError(resources.join('+'), 0));
-    for (const resource of resources) {
-      const lane = lanes.get(resource);
-      const ownerQueued = [...lane.queued].filter(ticket => ticket.owner === ownerKey).length;
-      if (lane.queued.size >= maxQueued || ownerQueued >= maxQueuedPerOwner) {
-        return Promise.reject(Object.assign(new Error("Host resource '" + resource + "' admission queue is full."), {
-          code: 'HOST_RESOURCE_QUEUE_FULL', retryable: true
-        }));
+    // Multi-lane waiters may fill a queue while this request's slots are idle.
+    // Pending limits protect waiting work, not work the pump can admit now.
+    if (resources.some(resource => lanes.get(resource).active >= lanes.get(resource).limit)) {
+      for (const resource of resources) {
+        const lane = lanes.get(resource);
+        const ownerQueued = [...lane.queued].filter(ticket => ticket.owner === ownerKey).length;
+        if (lane.queued.size >= maxQueued || ownerQueued >= maxQueuedPerOwner) {
+          return Promise.reject(Object.assign(new Error("Host resource '" + resource + "' admission queue is full."), {
+            code: 'HOST_RESOURCE_QUEUE_FULL', retryable: true
+          }));
+        }
       }
     }
     return new Promise((resolve, reject) => {

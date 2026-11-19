@@ -46,6 +46,9 @@ try {
   assert.equal(references.intelligence.primary, 'typescript-native');
   assert.ok(references.items.some(item => item.path === 'src/use.ts'));
 
+  const badPath = path.join(root, 'src', 'bad.ts');
+  const preservedMtime = new Date('2020-01-01T00:00:00Z');
+  fs.utimesSync(badPath, preservedMtime, preservedMtime);
   const diagnostics = await relaiCodeInspect(workspace, config, {
     action: 'diagnostics', path: 'src/bad.ts', maxResults: 20
   });
@@ -54,6 +57,19 @@ try {
   assert.equal(diagnostics.intelligence.primary, 'typescript-native');
   assert.ok(diagnostics.diagnosticCount > 0);
   assert.ok(diagnostics.diagnostics.some(item => item.path === 'src/bad.ts' && item.severity === 'error' && /not assignable/i.test(item.message)));
+
+  // Simulate an external editor atomically restoring same-length content at the old mtime.
+  const previous = fs.statSync(badPath);
+  const replacement = path.join(root, 'src', 'bad.staging');
+  fs.writeFileSync(replacement, 'export const broken: string = "x";\n');
+  fs.utimesSync(replacement, preservedMtime, preservedMtime);
+  fs.renameSync(replacement, badPath);
+  assert.equal(fs.statSync(badPath).size, previous.size);
+  assert.equal(fs.statSync(badPath).mtimeMs, previous.mtimeMs);
+  const corrected = await relaiCodeInspect(workspace, config, { action: 'diagnostics', path: 'src/bad.ts' });
+  assert.equal(corrected.intelligence.primary, 'typescript-native');
+  assert.equal(corrected.diagnosticsExecuted, true);
+  assert.equal(corrected.diagnosticCount, 0, 'same-size replacement with a preserved mtime must clear the old error');
 
   const rename = await planEdit(workspace, config, {
     semantic: { action: 'rename', path: 'src/math.ts', line: 1, column: 17, newName: 'sum' }

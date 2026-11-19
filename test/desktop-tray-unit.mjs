@@ -12,6 +12,7 @@ let trayEvents = [];
 let trayListeners = new Map();
 let balloonOptions = null;
 let primaryFocusCount = 0;
+let dashboardOpenCount = 0;
 
 class FakeTray {
   constructor(image) { this.image = image; this.menu = null; this.destroyed = false; trayConstructionCount += 1; }
@@ -46,7 +47,7 @@ const dependencies = {
   iconPath: 'icon.png',
   getStatus: () => status,
   getUpdateStatus: () => updateStatus,
-  openDashboard: async () => {},
+  openDashboard: async () => { dashboardOpenCount += 1; },
   focusPrimaryWindow() { primaryFocusCount += 1; },
   openDiagnostics: async () => {},
   openSettings: async () => {},
@@ -74,6 +75,10 @@ assert.deepEqual(balloonOptions, {
 });
 trayListeners.get('balloon-click')?.();
 assert.equal(primaryFocusCount, 1, 'clicking a Windows notification balloon must use the existing primary-window focus path');
+trayListeners.get('double-click')();
+currentMenu.find(item => item.label === 'Open Dashboard').click();
+assert.equal(primaryFocusCount, 2, 'Windows tray double-click must activate the resident primary window');
+assert.equal(dashboardOpenCount, 1, 'Open Dashboard must take the managed dashboard-open path');
 assert.equal(tray.showBalloon({ category: 'errors', title: 'Rel.AI needs attention', body: 'Check settings.' }), true);
 assert.equal(balloonOptions.iconType, 'error');
 updateStatus = { ...updateStatus, progress: { percent: 12.4 } };

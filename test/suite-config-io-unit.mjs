@@ -759,6 +759,15 @@ async function case_restore_contract_unit() {
   const workspace = { alias: 'repo', path: repo };
   
   try {
+    write('tracked.txt', 'keep before init\n');
+    const unverified = await relaiRestorePaths(workspace, {}, { paths: ['tracked.txt'] });
+    assert.equal(unverified.ok, false);
+    assert.equal(unverified.executed, false);
+    assert.equal(unverified.mutationEffect, 'none');
+    assert.deepEqual(unverified.changedFiles, []);
+    assert.match(unverified.error, /Could not verify the Git index\. No files were restored/);
+    assert.equal(read('tracked.txt'), 'keep before init\n');
+
     git('init', '-q');
     git('config', 'user.email', 'restore-test@example.com');
     git('config', 'user.name', 'Restore Contract Test');
@@ -766,11 +775,14 @@ async function case_restore_contract_unit() {
     git('add', 'tracked.txt');
     git('commit', '-qm', 'initial');
   
-    write('tracked.txt', 'changed\n');
+    write('tracked.txt', 'staged version\n');
+    git('add', '--', 'tracked.txt');
+    write('tracked.txt', 'unstaged version\n');
     write('untracked.txt', 'keep\n');
     const scoped = await relaiRestorePaths(workspace, {}, { paths: ['tracked.txt'] });
     assert.equal(scoped.ok, true);
-    assert.equal(read('tracked.txt'), 'saved\n');
+    assert.equal(read('tracked.txt'), 'staged version\n', 'restore uses the index version, not HEAD');
+    assert.equal(git('show', ':tracked.txt').trimEnd(), 'staged version', 'restore preserves the index');
     assert.equal(fs.existsSync(path.join(repo, 'untracked.txt')), true, 'scoped restore must not remove untracked files');
   
     await assert.rejects(
@@ -779,6 +791,22 @@ async function case_restore_contract_unit() {
       'scoped restore must never expand to the entire workspace'
     );
     assert.equal(fs.existsSync(path.join(repo, 'untracked.txt')), true);
+    write('folder/one.txt', 'one\n');
+    write('folder/two.txt', 'two\n');
+    git('add', '--', 'folder/one.txt', 'folder/two.txt');
+    fs.rmSync(path.join(repo, 'folder'), { recursive: true });
+    write('tracked.txt', 'keep this edit\n');
+    const refused = await relaiRestorePaths(workspace, {}, { paths: ['tracked.txt', 'folder'] });
+    assert.equal(refused.ok, false);
+    assert.equal(refused.mutationEffect, 'none');
+    assert.match(refused.error, /requires exact tracked file paths in the index/);
+    assert.equal(read('tracked.txt'), 'keep this edit\n', 'the whole batch is refused before mutation');
+    assert.equal(fs.existsSync(path.join(repo, 'folder')), false);
+
+    const deletedFile = await relaiRestorePaths(workspace, {}, { paths: ['folder/one.txt'] });
+    assert.equal(deletedFile.ok, true);
+    assert.equal(read('folder/one.txt'), 'one\n');
+    assert.equal(fs.existsSync(path.join(repo, 'folder/two.txt')), false, 'only the named file is restored');
     console.log('Restore contract passed for scoped literal paths.');
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
@@ -802,6 +830,8 @@ async function case_review_checkpoints_unit() {
   
     const __m4 = await import("../src/reviewCheckpoints.js");
     const { createReviewCheckpoint, replayReviewCheckpoint } = __m4;
+    const { serializeConnectorResult } = await import('../src/tools/connector.js');
+    const { OPERATION_IDS: OP } = await import('../src/tools/operationIds.js');
   
     const __m5 = await import("../src/tools/actionCatalog.js");
     const { getCatalogAction } = __m5;
@@ -825,6 +855,10 @@ async function case_review_checkpoints_unit() {
       reviewScope: 'task',
       reviewHash: 'review-hash-a',
       reviewedFiles: ['src/app.js'],
+      scopeGranularity: 'path',
+      mixedOwnershipPaths: ['src/app.js', 'outside-the-review.txt'],
+      scopeUncertain: true,
+      validationMutationEvidence: { detail: 'private evidence' },
       diff: 'diff --git a/src/app.js b/src/app.js\n+const value = 1;\n'
     };
     const checkpoint = createReviewCheckpoint(workspace, config, review);
@@ -837,6 +871,20 @@ async function case_review_checkpoints_unit() {
     assert.equal(replay.replayed, true);
     assert.match(replay.diff, /const value = 1/);
     assert.equal(replay.reviewHash, 'review-hash-a');
+    const project = (action, operationName, value) => serializeConnectorResult({ publicName: 'relai_changes', action, operationName, value });
+    for (const [action, operation, value] of [['diff', OP.CHANGES_DIFF, review], ['checkpoint', OP.CHANGES_CHECKPOINT, checkpoint], ['replay', OP.CHANGES_REPLAY, replay]]) {
+      const receipt = project(action, operation, value);
+      assert.equal(receipt.scopeGranularity, 'path');
+      assert.equal(receipt.diffTruncated, undefined, 'a legacy checkpoint without byte-limit evidence remains unknown');
+      assert.equal(receipt.untrackedReadOmitted, undefined, 'legacy reviews do not certify every untracked read');
+      assert.ok(receipt.mixedOwnershipWarning, 'shared-file hunks must not appear exclusively task-owned');
+      assert.equal(receipt.scopeUncertain, true);
+      assert.ok(receipt.scopeWarning);
+      assert.doesNotMatch(JSON.stringify(receipt), /outside-the-review\.txt|private evidence/);
+    }
+    const cleanScope = project('diff', OP.CHANGES_DIFF, { ...review, mixedOwnershipPaths: ['outside-the-review.txt'], scopeUncertain: undefined });
+    assert.equal(cleanScope.mixedOwnershipWarning, undefined);
+    assert.equal(cleanScope.scopeWarning, undefined);
   
     assert.throws(
       () => replayReviewCheckpoint(otherWorkspace, config, checkpoint.checkpointId),

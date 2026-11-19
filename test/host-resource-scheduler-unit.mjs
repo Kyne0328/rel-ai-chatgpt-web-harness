@@ -34,6 +34,7 @@ try {
     await verifyDefaultPersistentQueueTimeout();
   } else {
     await verifyRoundRobinFairness();
+    await verifyIdleLaneAtQueueLimits();
     await verifyQueueCancellation();
     await verifyProcessDeadlineQueue();
     await verifyBoundedHeavyAdmission();
@@ -67,6 +68,33 @@ async function verifyRoundRobinFairness() {
     order.push(name);
     lease.release();
   }
+}
+
+async function verifyIdleLaneAtQueueLimits() {
+  const scheduler = createFairResourceScheduler({ persistent: 1, heavy: 1 }, { maxQueued: 2, maxQueuedPerOwner: 1 });
+  const holder = await scheduler.acquire('persistent', 'holder');
+  const completed = [];
+  const waitForBoth = owner => scheduler.acquireMany(['persistent', 'heavy'], owner).then(lease => {
+    completed.push(owner);
+    lease.release();
+  });
+  const waiters = [waitForBoth('a')];
+  try {
+    // A's one pending multi-lane ticket must not prevent A from using idle heavy capacity.
+    (await scheduler.acquire('heavy', 'a')).release();
+    waiters.push(waitForBoth('b'));
+    const independent = await scheduler.acquire('heavy', 'c'); // Global pending cap is now full.
+    try {
+      assert.equal(scheduler.stats().heavy.queued, 2);
+      await assert.rejects(scheduler.acquire('heavy', 'd'), error => error.code === 'HOST_RESOURCE_QUEUE_FULL');
+      assert.deepEqual(completed, []);
+    } finally { independent.release(); }
+  } finally {
+    holder.release();
+    await Promise.all(waiters);
+    scheduler.dispose();
+  }
+  assert.deepEqual(completed, ['a', 'b']);
 }
 
 async function verifyQueueCancellation() {

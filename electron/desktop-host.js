@@ -198,6 +198,7 @@ async function createDesktopHost(options = {}) {
     canHideOnClose: () => desktopTray?.isAvailable() === true && desktopLifecycle.getStatus().keepRunningOnClose !== false,
     canUserClose: () => allowUpdaterQuit || appUpdater?.getStatus()?.state !== 'installing',
     getConnection: buildDashboardConnection,
+    getConnectionIdentity: () => serviceRuntime.getDashboardConnectionIdentity(),
     isQuitting: () => isQuitting,
     onError: error => setStatus({ error: formatError(error), errorCode: ERROR_CODES.UNKNOWN }),
     onLoadError: error => {
@@ -798,13 +799,11 @@ async function createDesktopHost(options = {}) {
   }
 
   function focusActiveWindow() {
-    taskbarCompletionBadge.clear();
-    const dashboardWindow = dashboardWindowManager.getWindow();
-    if (dashboardWindow && serviceRuntime.isListening()) {
-      dashboardWindow.show();
-      dashboardWindow.focus();
+    if (dashboardWindowManager.getWindow() && serviceRuntime.isListening()) {
+      void openRunningDashboard().catch(() => {}); // The common open path already reports and schedules recovery.
       return;
     }
+    taskbarCompletionBadge.clear();
     const setupWindow = setupWindowManager.getWindow();
     if (setupWindow) {
       setupWindow.show();
@@ -1148,6 +1147,10 @@ async function createDesktopHost(options = {}) {
       const status = await launchConfiguredDesktop({ routeHash });
       return { ok: status?.serverRunning === true };
     }
+    return openRunningDashboard(routeHash, windowOptions);
+  }
+
+  async function openRunningDashboard(routeHash = '', windowOptions = {}) {
     try {
       await showDashboardWindow(routeHash, windowOptions);
       return { ok: true };

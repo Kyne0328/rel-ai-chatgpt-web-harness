@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import { releaseArtifactNames } from '../scripts/release-artifacts.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -450,8 +451,8 @@ function verifyWorkflowContracts() {
   assert.match(workflow, /release create[^\n]*--prerelease/,
     'new automated GitHub releases must start as prereleases until promoted');
   assert.match(promotionWorkflow, /workflow_dispatch:[\s\S]*version:/, 'stable promotion must be an explicit versioned manual action');
-  assert.match(promotionWorkflow, /latest-mac\.yml/, 'promotion must verify macOS stable-channel metadata before exposing a candidate');
-  assert.match(promotionWorkflow, /release edit[^\n]*--prerelease=false[^\n]*--latest/, 'promotion must atomically expose the tested candidate to stable updater discovery');
+  assert.match(promotionWorkflow, /run:\s*node scripts\/promote-release\.mjs "\$VERSION"/, 'manual promotion must use the tested CLI');
+  assert.doesNotMatch(promotionWorkflow, /\bgh\s+release\s+edit\b/, 'the workflow must not bypass the shared preflight');
   assert.match(
     workflow,
     /linux-install-upgrade:[\s\S]*apt-get install --yes --no-install-recommends xvfb xauth[\s\S]*Validate fresh install and in-place upgrade/,
@@ -465,12 +466,9 @@ function verifyWorkflowContracts() {
 }
 
 function verifyPromotionPreflight() {
-  const requiredAssets = ['latest.yml', 'latest-linux.yml', 'latest-mac.yml', 'SHA256SUMS.txt'];
-  const requiredLine = fs.readFileSync(path.join(tmp, '.github', 'workflows', 'promote-release.yml'), 'utf8').match(/for required in (.+); do/);
-  assert.ok(requiredLine, 'promotion workflow must declare its required metadata');
-  assert.deepEqual([...requiredLine[1].matchAll(/"([^"]+)"/g)].map(match => match[1]).sort(), [...requiredAssets].sort(),
-    'the CLI and workflow must require the same release metadata');
-  const candidate = { isDraft: false, isPrerelease: true, assets: requiredAssets.map(name => ({ name })) };
+  const requiredAssets = Object.values(releaseArtifactNames('1.2.3'));
+  const candidate = { tagName: '1.2.3', isDraft: false, isPrerelease: true,
+    assets: requiredAssets.map(name => ({ name, state: 'uploaded', size: 12 })) };
   const scenarios = [
     { name: 'draft', candidate: { ...candidate, isDraft: true }, exitCode: 1, calls: ['view'] },
     { name: 'already stable', candidate: { ...candidate, isPrerelease: false }, exitCode: 1, calls: ['view'] },
@@ -480,7 +478,10 @@ function verifyPromotionPreflight() {
       exitCode: 1,
       calls: ['view']
     })),
-    { name: 'all metadata missing', candidate: { ...candidate, assets: [] }, exitCode: 1, calls: ['view'] },
+    { name: 'wrong tag', candidate: { ...candidate, tagName: '1.2.2' }, exitCode: 1, calls: ['view'] },
+    { name: 'empty upload', candidate: { ...candidate, assets: candidate.assets.map((a, i) => i ? a : { ...a, size: 0 }) }, exitCode: 1, calls: ['view'] },
+    { name: 'incomplete upload', candidate: { ...candidate, assets: candidate.assets.map((a, i) => i ? a : { ...a, state: 'starter' }) }, exitCode: 1, calls: ['view'] },
+    { name: 'all assets missing', candidate: { ...candidate, assets: [] }, exitCode: 1, calls: ['view'] },
     { name: 'invalid metadata JSON', body: '{', exitCode: 1, calls: ['view'] },
     { name: 'null metadata', body: 'null', exitCode: 1, calls: ['view'] },
     { name: 'inspection failure', candidate, viewStatus: 2, exitCode: 2, calls: ['view'] },

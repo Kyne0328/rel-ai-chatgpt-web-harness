@@ -17,6 +17,7 @@ import { ensureSessionStarted } from '../src/policyResolver.js';
 import { workspaceTidyPlan } from '../src/bridge/tidy.js';
 import { acquireHostResource, createFairResourceScheduler } from '../src/hostResourceScheduler.js';
 import { relaiRestorePaths } from '../src/bridge/restore.js';
+import { HANDLERS } from '../src/tools/handlers.js';
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-tiered-git-'));
 const repo = path.join(temp, 'repo');
@@ -198,6 +199,16 @@ try {
   assert.ok(taskCommitOwnership(config, 'unobserved', 'fixture').conflictingFiles.includes('firmware-extract/file-2.txt'), 'incomplete baselines still protect existing user files');
   assert.deepEqual(readTaskIntegrity(config, 'unobserved', 'fixture').baseline.opaqueDirectories, incompleteBaseline.opaqueDirectories);
   assert.equal(readTaskIntegrity(config, 'unobserved', 'fixture').baseline.observationComplete, false, 'later observations cannot replace a pre-mutation baseline');
+
+  // A new handler call reads the durable baseline, not the now-available Git status.
+  const checkpoint = await HANDLERS.reviewCheckpoint(config, {
+    workspace: 'fixture', work_id: 'unobserved', path: 'firmware-extract/file-2.txt'
+  });
+  assert.equal(checkpoint.scopeUncertain, true);
+  assert.deepEqual(checkpoint.reviewedFiles, ['firmware-extract/file-2.txt']);
+  const replay = await HANDLERS.reviewReplay(config, { workspace: 'fixture', checkpointId: checkpoint.checkpointId });
+  assert.equal(replay.scopeUncertain, true);
+  assert.equal(replay.scopeWarning, checkpoint.scopeWarning);
 
   const count = probes.length;
   await Promise.all(Array.from({ length: 6 }, () => readGitObservation(repo, config, { coalesce: true })));

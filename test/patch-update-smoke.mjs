@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { relaiApplyPatch } from "../src/localRepoBridge.js";
+import { relaiApplyPatch, normalizeOpenAIPatchFormat } from "../src/localRepoBridge.js";
 import { GIT_EXECUTABLE } from './helpers/git-executable.mjs';
 
 function git(args, options = {}) {
@@ -111,6 +111,19 @@ rename to public-config.txt
     /relai_edit requires non-empty updateText/
   );
   assert.equal(applied.ok, true, 'legacy patch tuning must not throttle or reject a valid edit after the hard cutover');
+
+  const truncated = '*** Begin Patch\n*** Add File: clipped.txt\n+first line';
+  const clipped = path.join(workspacePath, 'clipped.txt');
+  assert.throws(() => normalizeOpenAIPatchFormat(truncated), /closing.*End Patch/);
+  for (const dryRun of [true, false]) {
+    await assert.rejects(() => relaiApplyPatch(workspace, config, { patch: truncated, dryRun, returnDiff: false }), /closing.*End Patch/);
+    assert.equal(fs.existsSync(clipped), false, 'a truncated patch must not create a partial file');
+  }
+  const retry = await relaiApplyPatch(workspace, config, {
+    patch: truncated + '\n+second line\n*** End Patch', returnDiff: false
+  });
+  assert.equal(retry.ok, true);
+  assert.equal(fs.readFileSync(clipped, 'utf8'), 'first line\nsecond line\n');
 
   const openAiPatch = `*** Begin Patch
 *** Update File: hello.txt

@@ -263,18 +263,33 @@ function assertUpgradeSentinel() {
 async function findPreviousReleaseAsset({ repository, currentVersion, assetNameForVersion, token, fetchImpl = fetch, apiBase = process.env.GITHUB_API_URL || 'https://api.github.com' }) {
   const current = parseStableVersion(currentVersion);
   assert.ok(current, `Current release version must be stable semver: ${currentVersion}.`);
-  const response = await fetchImpl(`${apiBase}/repos/${repository}/releases?per_page=50`, {
-    headers: githubHeaders(token)
-  });
-  if (!response.ok) throw new Error(`GitHub releases lookup failed with HTTP ${response.status}.`);
-  const releases = await response.json();
-  const candidates = (Array.isArray(releases) ? releases : [])
-    .filter(release => !release?.draft && !release?.prerelease)
-    .map(release => ({ release, version: parseStableVersion(release?.tag_name) }))
-    .filter(item => item.version && compareStableVersions(item.version, current) < 0)
-    .sort((a, b) => compareStableVersions(b.version, a.version));
-
-  const previous = candidates[0];
+  const pageSize = 50;
+  const maxPages = 20;
+  let previous = null;
+  for (let page = 1; page <= maxPages; page += 1) {
+    // A Link header can signal another page, but never choose the destination
+    // for authenticated requests. Always construct the next URL on our API base.
+    const response = await fetchImpl(`${apiBase}/repos/${repository}/releases?per_page=${pageSize}&page=${page}`, {
+      headers: githubHeaders(token), signal: AbortSignal.timeout(15_000)
+    });
+    if (!response.ok) throw new Error(`GitHub releases lookup failed with HTTP ${response.status}.`);
+    const releases = await response.json();
+    if (!Array.isArray(releases) || releases.length > pageSize || releases.some(item =>
+      !item || typeof item.tag_name !== 'string' || typeof item.draft !== 'boolean' || typeof item.prerelease !== 'boolean')) {
+      throw new Error('GitHub release history is malformed; cannot establish the previous stable release.');
+    }
+    for (const release of releases) {
+      if (release.draft || release.prerelease) continue;
+      const version = parseStableVersion(release.tag_name);
+      if (version && compareStableVersions(version, current) < 0
+        && (!previous || compareStableVersions(version, previous.version) > 0)) previous = { version, release };
+    }
+    const hasNext = /;\s*rel\s*=\s*(?:"[^"]*\bnext\b[^"]*"|next\b)/i.test(response.headers?.get?.('link') || '');
+    if (releases.length < pageSize && !hasNext) break;
+    if (!releases.length || page === maxPages) {
+      throw new Error('GitHub release history is incomplete; refusing to fall back to fresh-install validation.');
+    }
+  }
   if (!previous) return null;
   const version = previous.version.join('.');
   const expectedName = assetNameForVersion(version);

@@ -121,6 +121,7 @@ type PendingRequest = {
   timer: NodeJS.Timeout;
   abortHandler?: () => void;
   signal?: AbortSignal;
+  nativeInput: boolean;
 };
 
 const DEFAULT_MAX_ELEMENTS = 120;
@@ -253,7 +254,7 @@ function createWindowsUiaAdapter(options: WindowsUiaAdapterOptions = {}): Comput
       perception: normalizePerception(perception),
       ...(appTarget ? { appTarget } : {}),
       target: normalizedTarget
-    });
+    }, signal);
     return normalizeActivation(result);
   }
 
@@ -279,7 +280,7 @@ function createWindowsUiaAdapter(options: WindowsUiaAdapterOptions = {}): Comput
       target: normalizedTarget,
       ...(appTarget ? { appTarget } : {}),
       text: normalizedText
-    });
+    }, signal);
     return normalizeActivation(result);
   }
 
@@ -296,7 +297,7 @@ function createWindowsUiaAdapter(options: WindowsUiaAdapterOptions = {}): Comput
         if (!pending.has(id)) return;
         void failProcess(Object.assign(new Error(`Windows UI Automation helper timed out after ${timeoutMs}ms.`), { code: 'COMPUTER_HELPER_TIMEOUT' }), process);
       }, timeoutMs);
-      const entry: PendingRequest = { resolve, reject, timer, ...(signal ? { signal } : {}) };
+      const entry: PendingRequest = { resolve, reject, timer, ...(signal ? { signal } : {}), nativeInput: payload.action === 'activate' || payload.action === 'set_value' };
       if (signal) {
         entry.abortHandler = () => {
           if (!pending.has(id)) return;
@@ -379,7 +380,15 @@ function createWindowsUiaAdapter(options: WindowsUiaAdapterOptions = {}): Comput
       const confirmed = await terminateOwnedHelper(active);
       const failure = Object.assign(error, { terminationConfirmed: confirmed });
       if (!confirmed) containmentFailure = Object.assign(new Error('The owned computer helper did not confirm termination. Further requests are blocked.'), { code: 'COMPUTER_HELPER_TERMINATION_UNCONFIRMED' });
-      for (const entry of entries) entry.reject(failure);
+      for (const entry of entries) {
+        if (!entry.nativeInput) { entry.reject(failure); continue; }
+        // Killing the helper contains remaining work; it cannot undo input the OS
+        // may have accepted before the reply was lost. Never suggest blind replay.
+        const uncertain = new Error(`${failure.message} Native input may already have taken effect. Observe the app before retrying.`, { cause: failure });
+        uncertain.name = failure.name;
+        entry.reject(Object.assign(uncertain, { terminationConfirmed: confirmed, outcomeUnknown: true,
+          ...('code' in failure ? { code: failure.code } : {}) }));
+      }
     })();
     cleanupPromise = cleanup;
     void cleanup.finally(() => { if (cleanupPromise === cleanup) cleanupPromise = null; });

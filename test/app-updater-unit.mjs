@@ -53,7 +53,7 @@ async function waitFor(condition, message, timeoutMs = 2000) {
   }
 }
 
-function createHarness({ currentVersion = '0.20.7', packaged = true, env = {}, platform = 'win32', manualMacUpdater = null, activeCalls = 0, activeTaskCount = 0, taskState = 'idle', tasks = [], checkFailures = [], downloadFailures = [], currentCompatibility = null, lastCheckAt = 0, fetchImpl = globalThis.fetch, now = () => Date.parse('2026-07-25T00:00:00.000Z'), autoDownloadUpdates = false, updateChannel = 'stable', beforeInstallError = null, commitCallback = null } = {}) {
+function createHarness({ currentVersion = '0.20.7', packaged = true, env = {}, platform = 'win32', manualMacUpdater = null, activeCalls = 0, activeTaskCount = 0, taskState = 'idle', tasks = [], checkFailures = [], downloadFailures = [], currentCompatibility = null, lastCheckAt = 0, fetchImpl = globalThis.fetch, now = () => Date.parse('2026-07-25T00:00:00.000Z'), autoDownloadUpdates = false, updateChannel = 'stable', beforeInstallError = null, commitCallback = null, onMacInstallerOpened } = {}) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-updater-'));
   roots.push(temp);
   if (lastCheckAt > 0) fs.writeFileSync(path.join(temp, 'update-state.json'), `${JSON.stringify({ lastCheckAt })}\n`);
@@ -75,6 +75,7 @@ function createHarness({ currentVersion = '0.20.7', packaged = true, env = {}, p
     autoUpdater: fake,
     platform,
     manualMacUpdater,
+    onMacInstallerOpened,
     env,
     now,
     fetchImpl,
@@ -233,6 +234,47 @@ assert.equal(macOpen.opened, true);
 assert.deepEqual(macCalls, { checks: 1, downloads: 1, opens: 1 });
 assert.equal(mac.fake.checkCalls, 0, 'macOS must not call electron-updater without latest-mac.yml metadata');
 assert.equal(mac.fake.downloadCalls, 0, 'macOS downloads the architecture-specific DMG through the manual updater');
+
+// Renderer/tray and deferred actions share one installer handoff. No OS shell is
+// invoked: explicitly pause the fake DMG open, then either commit or stop it.
+for (const interrupted of [false, true]) {
+  const gate = Promise.withResolvers();
+  let opens = 0;
+  let shutdowns = 0;
+  const harness = createHarness({ platform: 'darwin', manualMacUpdater: {
+    checkForUpdates: async () => ({ version: '0.21.0' }),
+    downloadUpdate: async () => ({ version: '0.21.0' }),
+    openDownloaded: () => { opens++; return gate.promise; }
+  }, onMacInstallerOpened: async () => { shutdowns++; harness.updater.stop(); } });
+  harness.updater.start();
+  await harness.updater.checkForUpdates();
+  await harness.updater.downloadUpdate();
+  // Stopped observers must not admit new work, even with a verified download.
+  harness.updater.stop();
+  const stopped = harness.updater.installUpdate();
+  assert.equal(opens, 0);
+  assert.equal((await stopped).skipped, true);
+  harness.updater.start({ preserveState: true });
+  const first = harness.updater.installUpdate();
+  assert.equal(opens, 1);
+  assert.equal(harness.updater.getStatus().state, 'installing');
+  const second = await harness.updater.installUpdate();
+  assert.equal(second.errorCode, 'update_busy');
+  assert.equal((await harness.updater.checkForUpdates()).errorCode, 'update_busy');
+  if (interrupted) {
+    harness.updater.stop();
+    harness.updater.start({ preserveState: true });
+  }
+  gate.resolve();
+  const result = await first;
+  assert.equal(opens, 1);
+  assert.equal(shutdowns, interrupted ? 0 : 1, 'a stale open must not shut down a newer lifecycle');
+  if (interrupted) {
+    assert.equal(result.skipped, true);
+    assert.equal(harness.updater.getStatus().canInstall, true);
+    harness.updater.stop();
+  } else assert.equal(result.opened, true, 'the legitimate shutdown callback may stop the updater');
+}
 
 const recentLaunch = createHarness({ lastCheckAt: Date.parse('2026-07-24T23:59:00.000Z') });
 recentLaunch.updater.start();

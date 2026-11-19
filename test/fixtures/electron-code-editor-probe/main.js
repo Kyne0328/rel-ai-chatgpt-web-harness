@@ -1,5 +1,5 @@
 /* global window, document, location, history, requestAnimationFrame */
-const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, ipcMain } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 
@@ -89,6 +89,13 @@ async function probeTaskChanges() {
     noCodeNavigation: !document.querySelector('[data-nav-id="code"]')
   };
 
+  const currentFileRows = () => [...document.querySelectorAll('[data-code-file][aria-current="true"]')].map(row => row.dataset.codeFile);
+  result.currentFiles = [currentFileRows()];
+  const copyButton = () => document.querySelector('[data-code-copy-path]');
+  copyButton().click();
+  await until(() => window.relaiCodeProbe.copiedPath() === 'src/new.js', 'copy initial path');
+  result.copiedPaths = [window.relaiCodeProbe.copiedPath()];
+
   const initialModel = current?.getModel?.();
   current?.setPosition({ lineNumber: 3, column: 4 });
   window.relaiCodeProbe.setRevision(2, 20);
@@ -152,6 +159,76 @@ async function probeTaskChanges() {
   document.querySelector('[data-code-file="src/example.js"]').click();
   await until(() => document.querySelector('[data-code-file-heading]')?.textContent === 'src/example.js', 'file selection');
   result.fileRoute = new URLSearchParams(location.hash.split('?')[1]).get('file');
+  copyButton().click();
+  await until(() => window.relaiCodeProbe.copiedPath() === 'src/example.js', 'copy newly selected path');
+  result.copiedPaths.push(window.relaiCodeProbe.copiedPath());
+  result.currentFiles.push(currentFileRows());
+
+  const step = direction => document.querySelector('[aria-label="' + direction + ' changed file"]');
+  const heading = () => document.querySelector('[data-code-file-heading]')?.textContent;
+  const fileParam = () => new URLSearchParams(location.hash.split('?')[1]).get('file');
+  const unavailable = element => element.disabled || element.getAttribute('aria-disabled') === 'true';
+  const firstBounded = unavailable(step('Previous')) && !unavailable(step('Next'));
+  step('Next').focus();
+  await window.relaiCodeProbe.pressEnter();
+  await until(() => heading() === 'src/new.js' && fileParam() === 'src/new.js', 'next changed file');
+  const lastBounded = !unavailable(step('Previous')) && unavailable(step('Next'));
+  result.stepperFocus = [document.activeElement === step('Next')];
+  step('Previous').focus();
+  await window.relaiCodeProbe.pressEnter();
+  await until(() => heading() === 'src/example.js' && fileParam() === 'src/example.js', 'previous changed file');
+  result.stepperFocus.push(document.activeElement === step('Previous'));
+  const filter = document.querySelector('[data-code-search]');
+  const setFileFilter = value => {
+    Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set.call(filter, value);
+    filter.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+  setFileFilter('new.js');
+  await until(() => document.querySelectorAll('[data-code-file]').length === 1, 'filtered file inventory');
+  result.fileStepper = { firstBounded, lastBounded, filteredHidden: !step('Next'), preserved: fileParam() };
+  setFileFilter('');
+  await until(() => step('Next') && !unavailable(step('Next')), 'restored file inventory');
+  document.querySelector('.code-tree-folder-label').click();
+  await until(() => !document.querySelector('[data-code-file]'), 'collapsed file inventory');
+  result.fileStepper.collapsedHidden = !step('Next');
+  document.querySelector('.code-tree-folder-label').click();
+  await until(() => step('Next') && !unavailable(step('Next')), 'expanded file inventory');
+
+  // The first response stays held until the second click has restored the selected diff.
+  window.relaiCodeProbe.holdDiff('src/new.js');
+  step('Next').click();
+  await until(() => window.relaiCodeProbe.diffIsHeld(), 'held next file request');
+  result.currentFiles.push(currentFileRows());
+  document.querySelector('[data-code-file="src/example.js"]').click();
+  await until(() => activeEditor() && copyButton()?.getAttribute('aria-label') === 'Copy file path: src/example.js', 'reselected diff while another file was pending');
+  window.relaiCodeProbe.releaseDiff();
+  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  result.reselectedFile = [heading(), fileParam(), copyButton()?.getAttribute('aria-label')];
+
+  // A passive task update must refresh the requested file, not the old successful permalink.
+  window.relaiCodeProbe.holdDiff('src/new.js');
+  step('Next').click();
+  await until(() => window.relaiCodeProbe.diffIsHeld(), 'held file selection before passive refresh');
+  window.relaiCodeProbe.setRevision(5, 20);
+  snapshot = { ...snapshot, tasks: snapshot.tasks.map(item => item.work_id === 'probe-task' ? { ...item, changeRevision: 5 } : item) };
+  listeners.forEach(listener => listener());
+  await until(() => activeEditor()?.getModel?.()?.getValue?.()?.includes('const answer = 46;'), 'selected file refreshed to latest content');
+  window.relaiCodeProbe.releaseDiff();
+  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  result.refreshedSelection = [heading(), fileParam(), copyButton()?.getAttribute('aria-label')];
+  document.querySelector('[data-code-file="src/example.js"]').click();
+  await until(() => heading() === 'src/example.js' && copyButton(), 'restored starting file');
+
+  window.relaiCodeProbe.rejectNextDiff('src/new.js');
+  step('Next').click();
+  await until(() => document.querySelector('[data-code-editor]')?.textContent.includes('Fixture file read interrupted'), 'rejected listed diff');
+  const retryFile = () => document.querySelector('[aria-label="Retry diff for src/new.js"]');
+  result.failedFile = { heading: heading(), permalink: fileParam(), offersCopy: Boolean(copyButton()), offersRetry: Boolean(retryFile()) };
+  if (retryFile()) {
+    retryFile().click();
+    await until(() => heading() === 'src/new.js' && fileParam() === 'src/new.js' && copyButton(), 'successful retry of listed file');
+    result.failedFile.recovered = heading();
+  }
 
   location.hash = '#code?workspace=app&task=probe-task&file=src%2Fnew.js&search=legacy&taskStatus=open&from=tasks';
   await until(() => location.hash.startsWith('#tasks?') &&
@@ -166,9 +243,33 @@ async function probeTaskChanges() {
   result.historicalFallback = Boolean(document.querySelector('[data-code-file="src/retained.js"]')) &&
     !document.querySelector('.task-diff-viewer .monaco-diff-editor');
 
+  location.hash = '#tasks?task=mixed-task&tab=changes&file=src%2Fretained.js';
+  await until(() => document.querySelector('.task-detail-header h2')?.textContent === 'mixed-task'
+    && document.querySelector('[data-code-editor]')?.textContent.includes('Original task diff unavailable'), 'unverified file in mixed task');
+  const provenance = () => document.querySelector('[data-code-view-state]')?.textContent;
+  result.mixedFileProvenance = [provenance()];
+  document.querySelector('[data-code-file="src/example.js"]').click();
+  await until(() => fileParam() === 'src/example.js' && activeEditor(), 'live file in same mixed task');
+  result.mixedFileProvenance.push(provenance());
+
+  location.hash = '#tasks?task=no-baseline-task&tab=changes&file=src%2Fretained.js';
+  await until(() => document.querySelector('.task-detail-header h2')?.textContent === 'no-baseline-task' &&
+    heading() === 'src/retained.js' && copyButton() && provenance(), 'loaded live file with no baseline');
+  const noBase = document.querySelector('[data-code-editor]');
+  result.liveMissingBase = { badge: provenance(), notice: noBase.querySelector('[role="status"]')?.textContent || '',
+    currentContent: noBase.querySelector('pre code')?.textContent.includes('function greet') === true };
+
   location.hash = '#tasks?task=probe-task&tab=changes&file=missing.js';
   await until(() => document.querySelector('[data-code-editor]')?.textContent.includes('not available for this task'), 'missing-file explanation');
   result.missingFilePreserved = new URLSearchParams(location.hash.split('?')[1]).get('file') === 'missing.js';
+  result.missingFileNotCopyable = !copyButton();
+  result.missingFileHasNoProvenance = !provenance();
+  result.unlistedFileNotRetriable = !document.querySelector('[aria-label^="Retry diff for "]');
+  result.currentFiles.push(currentFileRows());
+  result.missingFileCannotStep = ['Next', 'Previous'].every(direction => {
+    const button = step(direction);
+    return unavailable(button) && (button.disabled || button.tabIndex < 0);
+  });
 
   snapshot = {
     ...snapshot,
@@ -229,6 +330,19 @@ async function probeTaskChanges() {
   location.hash = '#tasks?task=mismatched-detail-task';
   await until(() => document.querySelector('[data-task-detail-state="error"]'), 'mismatched task detail');
   result.mismatchedTaskRejected = document.querySelector('[data-task-detail-state]')?.textContent.includes('did not match') === true;
+  const inventory = async taskId => {
+    location.hash = '#tasks?tab=changes&task=' + taskId;
+    await until(() => document.querySelector('.task-detail-header h2')?.textContent === taskId
+      && document.querySelector('[data-code-meta]')?.textContent.includes('Completed')
+      && !document.querySelector('[data-code-refresh]')?.disabled, 'loaded inventory ' + taskId);
+    return [document.querySelector('[data-code-meta]').textContent, document.querySelector('[data-code-files]').textContent,
+      document.querySelector('[data-code-editor]').textContent];
+  };
+  result.partialInventory = await inventory('partial-list-task');
+  location.hash = '#tasks?tab=changes&task=partial-list-task&file=not-listed.js';
+  await until(() => document.querySelector('[data-code-editor]')?.textContent.includes('not-listed.js'), 'unlisted path in partial inventory');
+  result.partialMissing = document.querySelector('[data-code-editor]').textContent;
+  result.emptyInventory = await inventory('no-change-task');
   return result;
 }
 
@@ -242,6 +356,12 @@ app.whenReady().then(async () => {
   });
   win.webContents.session.webRequest.onBeforeRequest((details, callback) => {
     callback({ cancel: new URL(details.url).pathname === '/public/dashboard-app.js' });
+  });
+  win.webContents.debugger.attach('1.3');
+  ipcMain.handle('code-probe:enter', async ({ sender }) => {
+    if (sender !== win.webContents) throw new Error('Unexpected probe window.');
+    await sender.debugger.sendCommand('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\r' });
+    await sender.debugger.sendCommand('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
   });
   try {
     await win.loadURL(targetUrl);

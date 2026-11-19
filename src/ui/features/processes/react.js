@@ -270,6 +270,7 @@ function OutputBlock({ processId, operationId, stream, value, meta, active }) {
   const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [error, setError] = useState('');
   const [following, setFollowing] = useState(true);
+  const [retryFollow, setRetryFollow] = useState(0);
   const outputRef = useRef(null);
   useEffect(() => {
     setHistory(null);
@@ -295,6 +296,13 @@ function OutputBlock({ processId, operationId, stream, value, meta, active }) {
       maxBytes: Math.min(PROCESS_OUTPUT_CHUNK_BYTES, remaining)
     }).then(range => {
       if (cancelled) return;
+      // Metadata can lead the retained file, including after rotation or cleanup.
+      // Never install a new history object or replay overlapping bytes unless
+      // this response advances the requested offset.
+      if (!Number.isSafeInteger(range.offset) || !Number.isSafeInteger(range.nextOffset)
+          || range.offset < offset || range.nextOffset < range.offset || range.nextOffset <= offset) {
+        throw new Error('The next output range is not available yet. The output already shown is unchanged.');
+      }
       setHistory(current => {
         if (!current || current.nextOffset !== offset) return current;
         const gapBytes = Math.max(0, Number(range.offset || 0) - current.nextOffset);
@@ -302,7 +310,7 @@ function OutputBlock({ processId, operationId, stream, value, meta, active }) {
         return {
           ...current,
           text: `${current.text}${gap}${String(range.text || '')}`,
-          nextOffset: Number(range.nextOffset || current.nextOffset),
+          nextOffset: range.nextOffset,
           gap: current.gap || gapBytes > 0
         };
       });
@@ -311,7 +319,7 @@ function OutputBlock({ processId, operationId, stream, value, meta, active }) {
       if (!cancelled) setError(errorMessage(nextError));
     });
     return () => { cancelled = true; };
-  }, [history, meta.totalBytes, processId, operationId, stream]);
+  }, [history, meta.totalBytes, meta.retainedFromOffset, processId, operationId, stream, retryFollow]);
 
   const loadEarlier = async () => {
     if (loadingEarlier || !canLoadEarlier) return;
@@ -375,7 +383,12 @@ function OutputBlock({ processId, operationId, stream, value, meta, active }) {
       `${formatBytes(meta.droppedBytes)} was dropped while Rel.AI was capturing this ${stream} stream.`
     ) : null,
     history?.gap ? h('div', { className: 'process-output-notice warning' }, 'A gap in this output could not be recovered from retained logs.') : null,
-    error ? h('div', { className: 'process-output-error', role: 'alert' }, error) : null,
+    error ? h('div', { className: 'process-output-error', role: 'alert' }, error,
+      history && nextOffset < meta.totalBytes ? h('button', {
+        type: 'button', className: 'secondary compact-button',
+        onClick: () => { setError(''); setRetryFollow(value => value + 1); }
+      }, 'Retry output') : null
+    ) : null,
     h('pre', { ref: outputRef, tabIndex: 0, 'aria-label': `Recent ${stream} output`,
       onScroll: event => {
         if (!active || !following) return;
@@ -391,7 +404,7 @@ function OutputBlock({ processId, operationId, stream, value, meta, active }) {
         onClick: () => { void loadEarlier(); }
       }, loadingEarlier ? 'Loading earlier output…' : 'Load earlier output'),
       h('span', null, `${formatBytes(startOffset - meta.retainedFromOffset)} earlier retained`)
-    ) : active && history ? h('div', { className: 'process-output-following', role: 'status' }, 'Full retained history loaded · following new output') : null
+    ) : active && history && nextOffset >= meta.totalBytes ? h('div', { className: 'process-output-following', role: 'status' }, history.gap ? 'Following new output' : 'Full retained history loaded · following new output') : null
   );
 }
 

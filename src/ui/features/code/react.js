@@ -1,6 +1,7 @@
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import './styles.css';
 import { fetchJson } from '../../api.js';
+import { copyText } from '../../clipboard.js';
 import { toast } from '../../components/toast.js';
 import { Icon } from '../../components/icons.js';
 
@@ -44,6 +45,7 @@ function ChangesDesktop({
   const [workspaceLoading, setWorkspaceLoading] = useState(false);
   const [filePath, setFilePath] = useState('');
   const [diffFile, setDiffFile] = useState(null);
+  const [failedPath, setFailedPath] = useState('');
   const [collapsedFolders, setCollapsedFolders] = useState(() => new Set());
   const [viewerMessage, setViewerMessage] = useState('Loading task changes…');
   const [viewerTone, setViewerTone] = useState('');
@@ -75,11 +77,11 @@ function ChangesDesktop({
     if (!normalizedTaskId || !normalizedPath || !activeRef.current) return false;
     const request = ++diffRequestRef.current;
     pendingDiffPathRef.current = normalizedPath;
-    if (normalizedPath !== filePathRef.current) {
-      setDiffFile(null);
-      setViewerMessage('Loading file diff…');
-      setViewerTone('');
-    }
+    // Keep the attempted filename visible on retry, without advancing the last successful route.
+    setFailedPath(previous => previous === normalizedPath ? previous : '');
+    if (normalizedPath !== filePathRef.current) setDiffFile(null);
+    setViewerMessage('Loading file diff…');
+    setViewerTone('');
     try {
       const file = await bridge.diff(normalizedTaskId, normalizedPath);
       if (file?.ok === false) throw new Error(file.error || 'The file diff could not be loaded.');
@@ -89,12 +91,14 @@ function ChangesDesktop({
       setFilePath(normalizedPath);
       onSelectFileRef.current?.(normalizedPath);
       setDiffFile(file);
+      setFailedPath('');
       setViewerMessage('');
       setViewerTone('');
       return true;
     } catch (error) {
       if (request !== diffRequestRef.current || taskIdRef.current !== normalizedTaskId || !activeRef.current) return false;
       setDiffFile(null);
+      setFailedPath(normalizedPath);
       setViewerMessage(messageFor(error));
       setViewerTone('error');
       return false;
@@ -103,13 +107,16 @@ function ChangesDesktop({
     }
   }, [bridge]);
 
-  const showUnavailableFile = useCallback(path => {
+  const showUnavailableFile = useCallback((path, partial) => {
     diffRequestRef.current += 1;
     filePathRef.current = '';
     pendingDiffPathRef.current = '';
     setFilePath('');
     setDiffFile(null);
-    setViewerMessage(`The requested file “${path}” is not available for this task. Choose a changed file or refresh to try again.`);
+    setFailedPath('');
+    setViewerMessage(partial
+      ? `The requested file “${path}” is not in the available portion of this task’s file list. Choose a listed file to review.`
+      : `The requested file “${path}” is not available for this task. Choose a changed file or refresh to try again.`);
     setViewerTone('error');
   }, []);
 
@@ -130,8 +137,14 @@ function ChangesDesktop({
       const currentPath = filePathRef.current;
       const requestedPath = requestedPathRef.current;
       const currentStillExists = Boolean(currentPath && changedFiles.includes(currentPath));
+      const pendingPath = pendingDiffPathRef.current;
+      // The permalink follows a successful read. A live update must refresh an in-flight selection, not its old URL.
+      if (pendingPath && pendingPath !== currentPath && requestedPath === currentPath && changedFiles.includes(pendingPath)) {
+        await loadDiff(normalizedTaskId, pendingPath);
+        return;
+      }
       if (requestedPath && !changedFiles.includes(requestedPath)) {
-        showUnavailableFile(requestedPath);
+        showUnavailableFile(requestedPath, nextWorkspace.truncated === true);
         return;
       }
       if (currentPath && !currentStillExists) {
@@ -224,8 +237,10 @@ function ChangesDesktop({
   const changedFiles = useMemo(() => changedTextFiles(workspace), [workspace]);
   useEffect(() => {
     if (!active || !workspace || !requestedFilePath) return;
+    // The previous permalink may have left the inventory while a still-listed selection is being refreshed.
+    if (requestedFilePath === filePathRef.current && changedFiles.includes(pendingDiffPathRef.current)) return;
     if (!changedFiles.includes(requestedFilePath)) {
-      showUnavailableFile(requestedFilePath);
+      showUnavailableFile(requestedFilePath, workspace.truncated === true);
       return;
     }
     if (requestedFilePath === filePathRef.current || requestedFilePath === pendingDiffPathRef.current) return;
@@ -237,8 +252,21 @@ function ChangesDesktop({
   }, [changedFiles, query]);
   const fileTree = useMemo(() => buildFileTree(visibleFiles), [visibleFiles]);
   const meta = workspaceMeta(workspace, workspaceError);
-  const viewState = workspace?.historyMode === 'unavailable' ? 'Current files only' : 'Read-only diff';
+  const emptyListText = workspaceError ? 'Task changes are unavailable.' : !workspace ? 'Loading changed files…'
+    : query.trim() ? (workspace.truncated ? 'No matches in the available file list.' : 'No matching changed files.')
+    : workspace.truncated ? 'No files are listed in the available portion.' : 'No task-owned changes to review.';
   const ideDisabled = openingIde || !editorId || !editors?.length;
+  const listedFailedPath = changedFiles.includes(failedPath) ? failedPath : '';
+  const displayPath = listedFailedPath || requestedFilePath || filePath;
+  // A deep link can name a missing file; only a matching loaded diff confirms the displayed path.
+  const confirmedPath = diffFile?.path === displayPath ? displayPath : '';
+  const viewState = currentFileOnly(diffFile) ? 'Current files only' : 'Read-only diff';
+  const copyPath = async () => {
+    try {
+      await copyText(confirmedPath);
+      toast('File path copied.', { variant: 'success' });
+    } catch (error) { toast(messageFor(error), { variant: 'error' }); }
+  };
 
   const openIde = async () => {
     if (ideDisabled || !selectedTaskId) return;
@@ -254,7 +282,9 @@ function ChangesDesktop({
   };
 
   const openFile = path => {
-    if (!path || path === filePathRef.current) return;
+    const pending = pendingDiffPathRef.current;
+    // A click on the last displayed file can supersede a pending switch or retry a failed read.
+    if (!path || path === pending || (!pending && diffFile?.path === path)) return;
     void loadDiff(selectedTaskId, path, workspace);
   };
 
@@ -267,6 +297,21 @@ function ChangesDesktop({
       return next;
     });
   }, []);
+
+  // Collect the same sorted rows the explorer renders, not hidden files or URL inputs.
+  const reviewPaths = [];
+  const treeRows = renderFileTree(fileTree, {
+    workspace, filePath: confirmedPath, openFile, collapsedFolders, toggleFolder, filtering: Boolean(query.trim()), reviewPaths
+  });
+  const index = confirmedPath ? reviewPaths.indexOf(confirmedPath) : -1;
+  const adjacentButton = (label, icon, offset) => {
+    const path = index < 0 ? '' : reviewPaths[index + offset];
+    return h('button', { className: 'secondary compact-button', type: 'button',
+      // Native disabled would blur the focused control as soon as a diff starts loading.
+      'aria-label': label, title: path ? label + ': ' + path : label,
+      'aria-disabled': !path || undefined, tabIndex: path ? 0 : -1,
+      onClick: () => { if (path) openFile(path); } }, h(Icon, { name: icon, size: 14 }));
+  };
 
   return h('div', { className: 'task-diff-viewer' },
     h('div', { className: 'task-diff-embedded-toolbar' },
@@ -295,9 +340,13 @@ function ChangesDesktop({
           className: 'secondary compact-button',
           type: 'button',
           'data-code-refresh': '',
-          disabled: workspaceLoading,
-          onClick: () => { void refreshWorkspace(selectedTaskId, { refreshCurrent: true }); }
-        }, workspaceLoading ? 'Loading…' : workspaceError ? 'Retry' : 'Refresh')
+          'aria-label': listedFailedPath ? 'Retry diff for ' + listedFailedPath : undefined,
+          disabled: workspaceLoading || Boolean(listedFailedPath && viewerTone !== 'error'),
+          onClick: () => {
+            if (listedFailedPath) openFile(listedFailedPath);
+            else void refreshWorkspace(selectedTaskId, { refreshCurrent: true });
+          }
+        }, workspaceLoading ? 'Loading…' : listedFailedPath ? (viewerTone === 'error' ? 'Retry file' : 'Retrying…') : workspaceError ? 'Retry' : 'Refresh')
       )
     ),
     workspaceError ? h('p', { className: 'connection-notice bad', role: 'alert', 'data-code-task-error': '' },
@@ -318,13 +367,22 @@ function ChangesDesktop({
         ),
         h('div', { className: 'code-file-list', 'data-code-files': '' },
           visibleFiles.length
-            ? h('ul', { className: 'code-file-tree' }, ...renderFileTree(fileTree, { workspace, filePath, openFile, collapsedFolders, toggleFolder, filtering: Boolean(query.trim()) }))
-            : h('div', { className: 'code-file-empty' }, query ? 'No matching changed files.' : (workspaceError ? 'Task changes are unavailable.' : 'No task-owned changes to review.'))
+            ? h('ul', { className: 'code-file-tree' }, ...treeRows)
+            : h('div', { className: 'code-file-empty' }, emptyListText)
         )
       ),
       h('section', { className: 'code-editor-pane', 'aria-label': 'Task diff viewer' },
         h('div', { className: 'code-editor-toolbar' },
-          h('div', { className: 'code-file-heading mono', 'data-code-file-heading': '' }, requestedFilePath || filePath || 'No file selected'),
+          h('div', { className: 'code-selected-file' },
+            h('div', { className: 'code-file-heading mono', 'data-code-file-heading': '', title: displayPath || undefined }, displayPath || 'No file selected'),
+            confirmedPath ? h('button', { className: 'secondary compact-button', type: 'button',
+              'aria-label': 'Copy file path: ' + confirmedPath, 'data-code-copy-path': '',
+              onClick: () => { void copyPath(); } }, h(Icon, { name: 'copy', size: 14 }), 'Copy path') : null,
+            reviewPaths.length > 1 ? h('div', { className: 'code-file-stepper', role: 'group', 'aria-label': 'Changed file navigation' },
+              adjacentButton('Previous changed file', 'chevronLeft', -1),
+              adjacentButton('Next changed file', 'chevronRight', 1)
+            ) : null
+          ),
           h('div', { className: 'code-view-controls' },
             h('span', { className: 'code-keyboard-hint' }, h('kbd', null, 'Ctrl+M'), ' changes whether Tab moves focus'),
             h('div', { className: 'code-diff-layout', role: 'group', 'aria-label': 'Diff layout' },
@@ -341,13 +399,17 @@ function ChangesDesktop({
                 onClick: () => setDiffLayout('unified')
               }, 'Unified')
             ),
-            h('span', { className: 'code-view-state', 'data-code-view-state': '' }, viewState)
+            confirmedPath ? h('span', { className: 'code-view-state', 'data-code-view-state': '' }, viewState) : null
           )
         ),
         active ? h(DiffViewer, { file: diffFile, message: viewerMessage, tone: viewerTone, layout: diffLayout, viewStates: editorViewStates }) : null
       )
     )
   );
+}
+
+function currentFileOnly(file) {
+  return file?.historyMode === 'unavailable' || file?.baseAvailable === false;
 }
 
 function DiffViewer({ file, message, tone, layout, viewStates }) {
@@ -358,9 +420,11 @@ function DiffViewer({ file, message, tone, layout, viewStates }) {
       role: tone === 'error' ? 'alert' : 'status'
     }, message || 'Choose a changed file to review its diff.');
   }
-  if (file.historyMode === 'unavailable') {
+  if (currentFileOnly(file)) {
     return h('section', { className: 'code-editor-host code-historical-fallback', 'data-code-editor': '' },
-      h('p', { role: 'status' }, 'Original task diff unavailable. This is the current file, not its historical version.'),
+      h('p', { role: 'status' }, file.historyMode === 'unavailable'
+        ? 'Original task diff unavailable. This is the current file, not its historical version.'
+        : 'Git baseline unavailable. Showing the current file without a diff.'),
       file.exists ? h('pre', { tabIndex: 0 }, h('code', null, file.content))
         : h('p', null, 'This file no longer exists in the project.'));
   }
@@ -375,6 +439,9 @@ const MonacoDiffViewer = memo(function MonacoDiffViewer({ file, layout, viewStat
   const fileRef = useRef(file);
   const layoutRef = useRef(layout);
   const [loadError, setLoadError] = useState('');
+  const [retrying, setRetrying] = useState(false);
+  const [editorAttempt, setEditorAttempt] = useState(0);
+  const retryVersion = useRef(null);
 
   fileRef.current = file;
   layoutRef.current = layout;
@@ -417,6 +484,7 @@ const MonacoDiffViewer = memo(function MonacoDiffViewer({ file, layout, viewStat
 
     return () => {
       active = false;
+      retryVersion.current = null;
       cleanupResize();
       cleanupTheme();
       const path = fileRef.current?.path;
@@ -427,7 +495,7 @@ const MonacoDiffViewer = memo(function MonacoDiffViewer({ file, layout, viewStat
       editorRef.current = null;
       monacoRef.current = null;
     };
-  }, [viewStates]);
+  }, [viewStates, editorAttempt]);
 
   useEffect(() => {
     if (!editorRef.current || !monacoRef.current) return;
@@ -443,7 +511,25 @@ const MonacoDiffViewer = memo(function MonacoDiffViewer({ file, layout, viewStat
   }, [layout]);
 
   if (loadError) {
-    return h('div', { className: 'code-editor-host', 'data-code-editor': '' }, h(DiffFallback, { file, layout }));
+    const retryEditor = async () => {
+      const version = Symbol();
+      retryVersion.current = version;
+      setRetrying(true);
+      try {
+        await loadMonaco();
+        if (version === retryVersion.current) {
+          setLoadError('');
+          setEditorAttempt(value => value + 1);
+        }
+      } catch (error) {
+        if (version === retryVersion.current) setLoadError(messageFor(error));
+      } finally {
+        if (version === retryVersion.current) setRetrying(false);
+      }
+    };
+    return h('div', { className: 'code-editor-host code-diff-recovery', 'data-code-editor': '' },
+      h('button', { type: 'button', className: 'secondary compact-button', disabled: retrying, onClick: retryEditor }, retrying ? 'Retrying editor…' : 'Retry editor'),
+      h(DiffFallback, { file, layout }));
   }
   return h('div', {
     ref: hostRef,
@@ -585,12 +671,15 @@ function renderFileTree(node, context, prefix = '') {
       );
     }),
     ...files.map(file => {
+      context.reviewPaths.push(file.path);
+      const current = file.path === context.filePath;
       const status = changedFileStatus(context.workspace, file.path);
       const statsLabel = status.hasLineStats ? `, +${status.additions} -${status.deletions}` : '';
       const label = `${status.label}${statsLabel}: ${file.path}`;
       return h('li', { className: 'code-tree-file', key: file.path },
         h('button', {
-          className: `code-file-row${file.path === context.filePath ? ' active' : ''}`,
+          className: `code-file-row${current ? ' active' : ''}`,
+          'aria-current': current ? 'true' : undefined,
           type: 'button',
           'data-code-file': file.path,
           title: label,
@@ -643,10 +732,12 @@ function workspaceMeta(workspace, error) {
   } else {
     parts.push('Current task changes');
   }
+  if (workspace.truncated === true) parts.push('Partial file list');
   return parts.join(' · ');
 }
 
 function emptyViewerMessage(workspace = {}) {
+  if (workspace?.truncated === true) return 'The changed-file list is incomplete. No files are available here to review.';
   if (workspace?.historyMode === 'unavailable') return 'This task records changed files, but its historical Git diff cannot be identified safely.';
   const status = String(workspace?.status || '').toLowerCase();
   if (['completed', 'cancelled', 'failed'].includes(status)) return 'This task has no recorded file changes.';
@@ -677,8 +768,11 @@ function loadMonaco() {
   if (window.monaco?.editor) return Promise.resolve(window.monaco);
   if (monacoPromise) return monacoPromise;
   monacoPromise = new Promise((resolve, reject) => {
+    const existing = document.querySelector('script[data-monaco-loader]');
+    const script = existing || document.createElement('script');
     const start = () => {
       if (typeof window.require !== 'function') {
+        script.remove();
         reject(new Error('Monaco loader did not initialize.'));
         return;
       }
@@ -691,24 +785,37 @@ function loadMonaco() {
           return '/vendor/monaco/editor/editor.worker.js';
         }
       };
-      window.require.config({ paths: { vs: '/vendor/monaco' } });
-      window.require([
-        'vs/editor/editor.main',
-        'vs/basic-languages/monaco.contribution'
-      ], () => resolve(window.monaco), reject);
+      try {
+        window.require.config({ paths: { vs: '/vendor/monaco' } });
+        window.require([
+          'vs/editor/editor.main',
+          'vs/basic-languages/monaco.contribution'
+        ], () => window.monaco?.editor ? resolve(window.monaco) : reject(new Error('Monaco editor did not initialize.')), reject);
+      } catch (error) { reject(error); }
     };
-    const existing = document.querySelector('script[data-monaco-loader]');
-    if (existing) {
-      if (typeof window.require === 'function') start();
-      else existing.addEventListener('load', start, { once: true });
-      return;
+    if (existing && typeof window.require === 'function') { start(); return; }
+    const cleanup = () => {
+      script.removeEventListener('load', loaded);
+      script.removeEventListener('error', failed);
+    };
+    const loaded = () => { cleanup(); start(); };
+    const failed = () => {
+      cleanup();
+      script.remove();
+      reject(new Error('Monaco editor assets could not load.'));
+    };
+    script.addEventListener('load', loaded);
+    script.addEventListener('error', failed);
+    if (!existing) {
+      script.src = '/vendor/monaco/loader.js';
+      script.dataset.monacoLoader = 'true';
+      document.head.appendChild(script);
     }
-    const script = document.createElement('script');
-    script.src = '/vendor/monaco/loader.js';
-    script.dataset.monacoLoader = 'true';
-    script.addEventListener('load', start, { once: true });
-    script.addEventListener('error', () => reject(new Error('Monaco editor assets could not load.')), { once: true });
-    document.head.appendChild(script);
+  }).catch(error => {
+    // Do not retry in the background; release the failed attempt for an
+    // explicit Retry editor or a subsequent viewer mount.
+    monacoPromise = null;
+    throw error;
   });
   return monacoPromise;
 }

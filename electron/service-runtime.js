@@ -34,6 +34,7 @@ function createDesktopServiceRuntime(deps) {
 
   let startPromise = null;
   let stopPromise = null;
+  let disposeUtilityOnStop = false;
   let restartPromise = null;
   let localReadyPromise = null;
   let lifecycleToken = 0;
@@ -415,17 +416,28 @@ function createDesktopServiceRuntime(deps) {
   }
 
   function stopServer(options = {}) {
+    if (options.terminateUtility === true) disposeUtilityOnStop = true;
     if (stopPromise) return stopPromise;
-    const pendingStop = stop(options);
-    stopPromise = pendingStop;
-    const clearPending = () => {
-      if (stopPromise === pendingStop) stopPromise = null;
+    let disposalStarted = false;
+    const disposeIfRequested = () => {
+      if (!disposeUtilityOnStop || disposalStarted) return null;
+      disposalStarted = true;
+      return serviceProcessClient.dispose({ stop: false });
     };
-    void pendingStop.then(clearPending, clearPending);
-    return pendingStop;
+    stopPromise = stop(options, disposeIfRequested).finally(async () => {
+      try {
+        // A terminal caller may have joined while dashboard close was awaiting.
+        const lateDisposal = disposeIfRequested();
+        if (lateDisposal) await lateDisposal;
+      } finally {
+        disposeUtilityOnStop = false;
+        stopPromise = null;
+      }
+    });
+    return stopPromise;
   }
 
-  async function stop(options) {
+  async function stop(options, disposeIfRequested) {
     stopGeneration += 1;
     const pendingLocalReady = localReadyPromise;
     lifecycleToken += 1;
@@ -452,7 +464,8 @@ function createDesktopServiceRuntime(deps) {
     ]);
     activePort = 0;
     activeToken = '';
-    if (options.terminateUtility === true) await serviceProcessClient.dispose({ stop: false });
+    const disposal = disposeIfRequested();
+    if (disposal) await disposal;
     if (!options.preserveDashboard) await dashboardWindowManager.close();
     const nextStatus = initialDesktopStatus(app.getVersion(), buildStatus);
     replaceCurrentStatus(nextStatus, { silent: options.silent === true });
@@ -470,8 +483,15 @@ function createDesktopServiceRuntime(deps) {
     return { ...nextStatus, cleanup };
   }
 
+  // A resident window needs only the live endpoint and generation, never a new bootstrap.
+  function getDashboardConnectionIdentity() {
+    if (stopPromise || !activePort || !isListening()) return null;
+    return { origin: `http://127.0.0.1:${activePort}`, authGeneration: lifecycleToken };
+  }
+
   async function buildDashboardConnection() {
-    if (!isListening()) throw new Error('Local service is not running.');
+    if (stopPromise || !isListening()) throw new Error('Local service is not running.');
+    const authGeneration = lifecycleToken;
     let authorization;
     try {
       authorization = await serviceProcessClient.dashboardBootstrap();
@@ -481,15 +501,18 @@ function createDesktopServiceRuntime(deps) {
       if (error?.code !== 'REL_AI_SERVICE_REQUEST_TIMEOUT' || !isListening()) throw error;
       authorization = await serviceProcessClient.dashboardBootstrap();
     }
+    if (stopPromise || !isListening() || lifecycleToken !== authGeneration) {
+      throw new Error('Local service changed while authorizing the dashboard. Reopen the dashboard to retry.');
+    }
     const chrome = dashboardWindowManager.getState();
     const chromeMode = chrome.customTitleBar ? 'custom' : 'native';
     return {
       url: `http://127.0.0.1:${authorization.port}/dashboard?surface=desktop&chrome=${chromeMode}&platform=${encodeURIComponent(chrome.platform)}&bootstrap=${encodeURIComponent(authorization.bootstrap)}`,
-      authGeneration: lifecycleToken
+      authGeneration
     };
   }
 
-  return { startServer, restartConnection, restartAdditionalTunnels, stopServer, isListening, waitUntilListening, buildDashboardConnection, runTunnelDoctor };
+  return { startServer, restartConnection, restartAdditionalTunnels, stopServer, isListening, waitUntilListening, buildDashboardConnection, getDashboardConnectionIdentity, runTunnelDoctor };
 }
 
 async function waitForLocalApplicationReady(fetchImpl, port, token, timeoutMs = LOCAL_READY_TIMEOUT_MS) {

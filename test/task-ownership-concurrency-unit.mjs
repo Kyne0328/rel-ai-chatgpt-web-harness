@@ -79,6 +79,16 @@ try {
   });
   assert.equal(fs.readFileSync(path.join(workspacePath, 'src', 'shared.js'), 'utf8').replaceAll('\r\n', '\n'), 'export const left = 1;\nexport const right = 2;\n');
 
+  const checkpoint = await callTool('relai_changes', {
+    action: 'checkpoint', workspace: 'app', work_id: taskA.work_id, path: 'src/shared.js'
+  });
+  assert.equal(checkpoint.ok, true);
+  assert.ok(checkpoint.mixedOwnershipWarning, 'a checkpoint of a shared file must not claim exclusive ownership of its hunks');
+  assert.deepEqual(checkpoint.reviewedFiles, ['src/shared.js']);
+  const replay = await callTool('relai_changes', { action: 'replay', workspace: 'app', checkpointId: checkpoint.checkpointId });
+  assert.equal(replay.mixedOwnershipWarning, checkpoint.mixedOwnershipWarning);
+  assert.equal(replay.diff, checkpoint.diff);
+
   const headBeforeRejectedPublish = git('rev-parse', 'HEAD').trim();
   const sharedPublish = await callTool('relai_publish', {
     action: 'commit', workspace: 'app', work_id: taskA.work_id, message: 'must not absorb shared task work'

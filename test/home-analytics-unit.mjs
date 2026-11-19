@@ -70,4 +70,56 @@ assert.equal(workspaceView.metrics[3].label, 'Total execution time');
 assert.equal(workspaceView.metrics[3].value, '1.50 s');
 
 assert.equal(homeAnalyticsView({ points: [] }).pulse.empty, true);
+
+{
+  const { clearDashboardAnalytics, loadAnalyticsModels, subscribeAnalyticsReset } = await import('../src/ui/features/usage/data.js');
+  const { postJson } = await import('../src/ui/api.js');
+  const reset = desktop => clearDashboardAnalytics(desktop, () => postJson('/api/diagnostics/reset', { target: 'analytics', confirm: true }));
+  const previousFetch = globalThis.fetch;
+  const bridge = {}, other = {};
+  const totals = count => ({ requests: count, toolCalls: count, successes: count, failures: 0, executionMs: 0, activeDays: count ? 1 : 0 });
+  const snapshot = count => ({ month: '2026-11', totals: totals(count) });
+  const readMonth = async (desktop, fresh = false) => (await loadAnalyticsModels({
+    desktop, range: '1h', now: new Date('2026-11-15T12:00:00Z'), fresh
+  })).models[0].totals.toolCalls;
+  let count = 11, otherReads = 0, refreshes = 0;
+  bridge.getLocalUsage = async () => snapshot(count);
+  other.getLocalUsage = async () => { otherReads++; return snapshot(7); };
+  const unsubscribe = subscribeAnalyticsReset(bridge, () => { refreshes++; });
+  try {
+    assert.equal(await readMonth(bridge), 11);
+    assert.equal(await readMonth(other), 7);
+    globalThis.fetch = async (url, init) => {
+      assert.equal(url, '/api/diagnostics/reset');
+      assert.deepEqual(JSON.parse(init.body), { target: 'analytics', confirm: true });
+      return Response.json({ ok: false, error: 'reset refused' }, { status: 409 });
+    };
+    assert.equal((await reset(bridge)).ok, false);
+    assert.equal(refreshes, 0);
+    let finishRead;
+    bridge.getLocalUsage = () => new Promise(resolve => { finishRead = resolve; });
+    assert.equal(await readMonth(bridge), 11, 'explicit rejection preserves the last valid cache');
+    const olderRead = readMonth(bridge, true);
+    await Promise.resolve();
+    globalThis.fetch = async () => { count = 0; return Response.json({ ok: true }); };
+    assert.equal((await reset(bridge)).ok, true);
+    assert.equal(refreshes, 1, 'already-mounted consumers receive the reset');
+    bridge.getLocalUsage = async () => snapshot(count);
+    assert.equal(await readMonth(bridge), 0, 'immediately reopening must read the emptied store');
+    finishRead(snapshot(11));
+    assert.equal(await olderRead, 0, 'a pre-reset read completing later must not publish deleted totals');
+    assert.equal(await readMonth(bridge), 0);
+    assert.equal(await readMonth(other), 7);
+    assert.equal(otherReads, 1, 'reset invalidation must not cross desktop bridges');
+    unsubscribe();
+    globalThis.fetch = async () => { count = 3; throw new Error('lost confirmation'); };
+    assert.equal((await reset(bridge)).outcomeUnknown, true);
+    assert.equal(await readMonth(bridge), 3, 'uncertain reset re-reads actual state without claiming deletion');
+    assert.equal(refreshes, 1, 'disposed listeners must not be notified');
+  } finally {
+    unsubscribe();
+    globalThis.fetch = previousFetch;
+  }
+}
+
 console.log('Overview analytics preview model passed.');

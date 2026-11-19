@@ -233,8 +233,9 @@ try {
   try { diff = buildUntrackedDiff(workspace, ['large.txt'], 2048); }
   finally { fs.readSync = originalRead; syncBuiltinESMExports(); }
   assert.ok(readBytes <= 2048, String(readBytes));
-  assert.match(diff, /bounded file prefix/);
-  assert.ok(Buffer.byteLength(diff) < 2300);
+  assert.equal(diff.truncated, true);
+  assert.match(diff.text, /bounded file prefix/);
+  assert.ok(Buffer.byteLength(diff.text) < 2300);
 
   const env = withTaskEphemeralEnvironment(config, 'long-running', workspace);
   const scratch = env.REL_AI_EPHEMERAL_DIR;

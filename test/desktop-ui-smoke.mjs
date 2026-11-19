@@ -305,6 +305,41 @@ for (const kind of ['notifications', 'lifecycle', 'telemetry', 'browser', 'stora
   harness.unmount();
 }
 
+// A manual connection choice persists, but a task-specific route wins. Unknown,
+// disabled and unreadable preferences must never select an unavailable account.
+{
+  const connections = [{ tunnelId: 'first' }, { tunnelId: 'second' }, { tunnelId: 'disabled', enabled: false }];
+  const browser = { goalLoginStart() {}, goalLoginStatus: async input => input
+    ? { ...connections.find(item => item.tunnelId === input.tunnelId), state: 'signed_in' } : { connections } };
+  let saved = '';
+  const localStorage = { getItem: () => saved, setItem: (_key, value) => { saved = value; } };
+  const select = async (search = '', storage = localStorage) => {
+    const app = settingsReadHarness(['GoalModeAccount'], {
+      window: { localStorage: storage }, getRouteSnapshot: () => ({ search })
+    });
+    app.render('GoalModeAccount', { browser });
+    await settleSettingsReads();
+    const tree = app.render('GoalModeAccount', { browser });
+    const picker = settingsNodes(tree).find(node => node.type === 'select');
+    return { app, picker };
+  };
+  const first = await select();
+  assert.equal(first.picker.props.value, 'first');
+  first.picker.props.onChange({ target: { value: 'second' } });
+  first.app.unmount();
+  assert.equal(saved, 'second');
+  for (const [search, stored, expected] of [['', 'second', 'second'], ['?tunnel=first', 'second', 'first'],
+    ['', 'missing', 'first'], ['', 'disabled', 'first']]) {
+    saved = stored;
+    const { app, picker } = await select(search);
+    assert.equal(picker.props.value, expected);
+    app.unmount();
+  }
+  const denied = await select('', { getItem() { throw new Error('Storage unavailable'); } });
+  assert.equal(denied.picker.props.value, 'first');
+  denied.app.unmount();
+}
+
 // Structured read errors also recover when no account status was loaded.
 {
   let calls = 0;

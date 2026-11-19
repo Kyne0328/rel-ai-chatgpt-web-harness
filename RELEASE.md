@@ -13,7 +13,7 @@ npm run audit:packaging
 npm run benchmark:observability
 ```
 
-`release:check` is the authoritative finalized-release metadata gate. It verifies every synchronized version surface, the current changelog entry, release manifest, generated color assets, and current public tool-manifest metadata. `test:all` handles normal development validation without duplicating finalized release metadata checks. CI and packaging use Node.js 26. Live npm audits block confirmed high/critical findings, but a temporary npm advisory-service outage is reported rather than turning an otherwise reproducible release into a false failure.
+`release:check` is the authoritative finalized-release metadata gate. It verifies every synchronized version surface, the current changelog entry, release manifest, generated color assets, and current public tool-manifest metadata. `test:all` handles normal development validation without duplicating finalized release metadata checks. CI and packaging use Node.js 26. Live npm audits block release on confirmed high/critical findings (exit 1). If the advisory service is unavailable or its response cannot be verified, the audit exits 2 and also blocks release. Retry the audit when the service recovers.
 
 When working through Rel.AI itself, use the task-aware validation and diff tools so the evidence remains associated with the current work session.
 
@@ -114,7 +114,9 @@ Do not run installer lifecycle tests on the developer machine hosting the active
 
 ## 10. Publish
 
-Pushing the version commit to `main` triggers `.github/workflows/release.yml`. Preflight first rejects inconsistent release metadata before any platform package is built. The workflow then builds and verifies platform release artifacts. Windows and Linux must additionally pass the disposable fresh-install/upgrade jobs before the combined release can be prepared, attested, and published. If a prior publication attempt created the version tag but not the GitHub release, a rerun may recover only when that tag resolves to the exact current release commit; a tag pointing elsewhere fails closed.
+Pushing to `main` runs CI but does not publish. Manually dispatch `.github/workflows/release.yml` on the tested release commit to publish a prerelease candidate. Preflight first rejects inconsistent release metadata before any platform package is built. The workflow then builds and verifies platform release artifacts. Windows and Linux must additionally pass the disposable fresh-install/upgrade jobs before the combined release can be prepared, attested, and published. If a prior publication attempt created the version tag but not the GitHub release, a rerun may recover only when that tag resolves to the exact current release commit; a tag pointing elsewhere fails closed.
+
+When ready for the stable channel, manually dispatch `.github/workflows/promote-release.yml` with the candidate version or run `npm run release:promote -- <version>`. Both use the same preflight: the tag must match a published prerelease and every canonical asset for that version must be uploaded and nonempty, including both macOS architectures, Windows and Linux payloads, all update feeds, the checksums and the SBOM. Promotion checks GitHub’s asset inventory, not a second byte-level verification; it changes the existing candidate to stable/latest without rebuilding it.
 
 Rel.AI-owned Windows artifacts currently disable certificate auto-discovery and are covered by SHA-256 plus GitHub attestations. macOS artifacts also disable certificate auto-discovery; they are ad-hoc signed only, are not notarized, and are explicitly labeled that way in GitHub release notes. Users should copy the app to Applications, attempt to open it once, then use System Settings → Privacy & Security → Open Anyway when Gatekeeper blocks the unnotarized app. The packaged OpenAI tunnel-client bytes must match the reviewed provenance manifest.
 

@@ -444,7 +444,7 @@ async function case_task_inspector_lifecycle_unit() {
 
   // Run the actual page/inspector callbacks with deterministic hook state and
   // effect cleanup. Child elements remain inspectable without a browser build.
-  function harness(task = '', developerUnlocked = false) {
+  function harness(task = '', developerUnlocked = false, clipboard = async () => {}) {
     const componentSlots = new Map();
     let slots = [];
     const requests = [];
@@ -515,16 +515,19 @@ async function case_task_inspector_lifecycle_unit() {
       reconcileUnconfirmedResult: async result => result,
       requestDashboardRefresh: () => { refreshes += 1; },
       toast() {},
+      copyText: clipboard,
       confirmAction: async () => true,
       routeHref: (path, query) => `#${path}${query?.tunnel ? `?tunnel=${encodeURIComponent(query.tunnel)}` : ''}`,
       readDeveloperOptionsUnlocked: () => developerUnlocked,
       orderWorkspacesAlphabetically: rows => rows
     };
-    vm.runInNewContext(source + '\nglobalThis.components = { SessionsPage, SessionInspector, SessionTabs, TaskDetailsSection, TaskProcessesSection, CurrentOperations, TaskTraceSection };', context);
+    vm.runInNewContext(source + '\nglobalThis.components = { SessionsPage, SessionInspector, SessionTabs, TaskDetailsSection, TaskProcessesSection, CurrentOperations, TaskTraceSection, AttentionSection, FailureHistorySection, sessionMatchesFilters };', context);
     return {
       requests, controls,
+      matchesFilter: (session, status) => context.components.sessionMatchesFilters(session, '', status),
       refreshes: () => refreshes,
       navigate: next => { params = new URLSearchParams(next ? { task: next } : {}); },
+      setWorkspace: workspace => { params = new URLSearchParams(workspace ? { workspace } : {}); },
       render(name, props) {
         if (!componentSlots.has(name)) componentSlots.set(name, []);
         slots = componentSlots.get(name);
@@ -568,6 +571,59 @@ async function case_task_inspector_lifecycle_unit() {
   const retained = { id: 'retained-old', title: 'Retained task outside bootstrap', workspace: 'app', status: 'completed' };
 
   {
+    // Rows seen under one project are displayable in All, but never prove
+    // that the intervening global history was loaded.
+    const app = harness('');
+    const newest = recent.map(task => ({ ...task, workspace: 'B' }));
+    const props = { data: { ...data, tasks: newest } };
+    const projectOld = { id: 'older-A', title: 'Older A', workspace: 'A', status: 'completed', historyUpdatedAtMs: 500 };
+    const middle = { id: 'middle-B', title: 'Middle B', workspace: 'B', status: 'completed', historyUpdatedAtMs: 750 };
+    const page = () => app.render('SessionsPage', props);
+    const more = tree => find(tree, node => Object.hasOwn(node.props, 'data-load-more-sessions'));
+    const nextRequest = () => {
+      const before = app.requests.length;
+      for (let clicks = 0; clicks < 20 && app.requests.length === before; clicks++) {
+        const button = more(page());
+        assert.ok(button && !button.props.disabled, 'the selected scope has a continuation');
+        button.props.onClick();
+      }
+      assert.equal(app.requests.length, before + 1);
+      return app.requests.at(-1);
+    };
+    const params = req => new URL(req.url, 'http://fixture').searchParams;
+    app.setWorkspace('A');
+    const a = nextRequest();
+    assert.equal(params(a).get('workspace'), 'A');
+    assert.equal(params(a).has('cursor'), false);
+    const aCursor = { updatedAtMs: 500, id: projectOld.id };
+    a.resolve({ ok: true, tasks: [projectOld], page: { hasMore: true, nextCursor: aCursor } });
+    await settle();
+
+    app.setWorkspace('');
+    const all = nextRequest();
+    assert.equal(params(all).has('workspace'), false);
+    assert.equal(params(all).has('cursor'), false, 'All must start its own canonical query, not after project A');
+    const allCursor = { updatedAtMs: 901, id: newest.at(-1).id };
+    all.resolve({ ok: true, tasks: newest, page: { hasMore: true, nextCursor: allCursor } });
+    await settle();
+    const continuation = app.requests.at(-1);
+    assert.deepEqual(JSON.parse(params(continuation).get('cursor')), allCursor, 'overlap with the bootstrap must use the server continuation');
+    app.setWorkspace('A');
+    const a2 = nextRequest();
+    assert.deepEqual(JSON.parse(params(a2).get('cursor')), aCursor, 'A can continue independently while All is still loading');
+    a2.resolve({ ok: true, tasks: [], page: { hasMore: false } });
+    continuation.resolve({ ok: true, tasks: [middle, projectOld], page: { hasMore: false } });
+    await settle();
+    assert.equal(more(page()), null);
+    app.setWorkspace('');
+    const completed = page();
+    assert.ok(find(completed, node => node.props.session?.id === middle.id), 'global history must include the row between scope boundaries');
+    assert.equal(more(completed), null, 'both scopes stop only after their own final page');
+    app.dispose();
+  }
+
+
+  {
     const app = harness('');
     const page = app.render('SessionsPage', { data });
     const empty = find(page, node => node.props?.className === 'inspector-empty');
@@ -588,7 +644,7 @@ async function case_task_inspector_lifecycle_unit() {
     assert.equal(new URL(app.requests[0].url, 'http://localhost').searchParams.get('activityOnly'), '1',
       'recent tasks should retain the lightweight activity request');
     app.requests[0].resolve({ ok: true, activity: { entries: [], page: {} },
-      goalMode: { goalActive: true, state: 'rate_limited', mode: 'goal' } });
+      goalMode: { work_id: active.id, goalActive: true, state: 'rate_limited', mode: 'goal', chatLink: { state: 'rate_limited' } } });
     await settle();
     const page = app.render('SessionsPage', { data: activeData });
     const session = inspector(page)?.props.session;
@@ -599,6 +655,28 @@ async function case_task_inspector_lifecycle_unit() {
     const details = app.render('TaskDetailsSection', find(detail, node => node.type?.name === 'TaskDetailsSection').props);
     assert.equal(find(details, node => node.type?.name === 'Detail' && node.props.label === 'Mode')?.props.value, 'Goal Mode',
       'Task Details must not mislabel an active goal as a Normal task');
+    const linkButton = tree => find(tree, node => Object.hasOwn(node.props, 'data-refresh-chat-link'));
+    const open = tree => find(tree, node => node.type === 'a' && node.children.includes('Open in ChatGPT'));
+    assert.ok(linkButton(detail), 'a waiting on-page Goal must be able to recheck its receipt');
+    assert.equal(open(detail), null);
+    linkButton(detail).props.onClick();
+    const refreshing = app.render('SessionsPage', { data: activeData });
+    assert.equal(linkButton(app.render('SessionInspector', inspector(refreshing).props)).props.disabled, true);
+    assert.equal(app.requests.length, 2);
+    const request = app.requests[1];
+    assert.equal(new URL(request.url, 'http://localhost').searchParams.get('task'), active.id);
+    assert.equal(request.options.cache, 'no-store');
+    assert.equal(app.controls.length, 0, 'checking a stored receipt is not a task or ChatGPT action');
+    const conversationId = '12345678-5678-4321-a123-1234567890ab';
+    const href = 'https://chatgpt.com/c/' + conversationId;
+    request.resolve({ ok: true, activity: { entries: [], page: {} },
+      goalMode: { work_id: active.id, goalActive: true, state: 'monitoring', conversationId,
+        chatLink: { state: 'linked', version: 1, verifiedAt: 100, conversationUrl: href } } });
+    await settle();
+    const updated = app.render('SessionInspector', inspector(app.render('SessionsPage', { data: activeData })).props);
+    assert.equal(open(updated)?.props.href, href);
+    assert.equal(linkButton(updated), null);
+    assert.equal(app.requests.length, 2, 'refresh must not introduce polling');
     app.dispose();
   }
 
@@ -670,6 +748,72 @@ async function case_task_inspector_lifecycle_unit() {
     assert.equal(find(operationOnly, node => node.type === 'strong' && node.children.includes('No running operations or managed commands')), null, 'operation-only tasks must not show an empty state');
     const empty = app.render('TaskProcessesSection', { session: completed, taskId: active.id, active: true });
     assert.ok(find(empty, node => node.type === 'strong' && node.children.includes('No running operations or managed commands')));
+    app.dispose();
+  }
+
+  {
+    let copied = '';
+    const app = harness('', false, async value => { copied = value; });
+    const conversationId = '12345678-5678-4321-a123-1234567890ab';
+    const href = 'https://chatgpt.com/c/' + conversationId;
+    const link = { state: 'linked', version: 1, verifiedAt: 1, conversationUrl: href };
+    const goal = { work_id: retained.id, conversationId, chatLink: link };
+    const session = { ...retained, validation: 'passed', workspace: 'PRIVATE_PROJECT', summary: 'PRIVATE_RESULT',
+      goalMode: goal, correlation: { conversationId }, changedFiles: ['PRIVATE_PATH'],
+      plan: { steps: [{ status: 'completed', title: 'PRIVATE_STEP' }, { status: 'pending' }] } };
+    const render = goalMode => app.render('SessionInspector', { session: { ...session, goalMode }, activeTab: 'overview' });
+    const open = tree => find(tree, node => node.type === 'a' && node.children.includes('Open in ChatGPT'));
+    const tree = render(goal);
+    const external = open(tree);
+    assert.equal(external.props.href, href);
+    assert.equal(external.props.target, '_blank');
+    assert.match(external.props.rel, /noreferrer/);
+    assert.equal(copied, '', 'Displaying a task must not copy or send any text.');
+    find(tree, node => Object.hasOwn(node.props, 'data-copy-handoff')).props.onClick();
+    await settle();
+    assert.equal(copied, [
+      'Rel.AI task handoff', 'Work ID: ' + retained.id, 'Status: Completed',
+      'Plan: 1/2 steps resolved', 'Recorded validation: Passed'
+    ].join('\n'));
+    const stale = app.render('SessionInspector', { session: { ...session, validation: 'stale' }, activeTab: 'details' });
+    find(stale, node => Object.hasOwn(node.props, 'data-copy-handoff')).props.onClick();
+    await settle();
+    assert.match(copied, /Recorded validation: Out of date; recheck$/);
+    const details = app.render('TaskDetailsSection', find(stale, node => node.type?.name === 'TaskDetailsSection').props);
+    assert.equal(find(details, node => node.type?.name === 'Detail' && node.props.label === 'Validation').props.value, 'Out of date; recheck');
+    const staleCompleted = { ...session, validation: 'stale', failures: 2 };
+    assert.equal(model.sessionNeedsAttention(staleCompleted), true, 'completed work with explicitly stale checks needs rechecking');
+    assert.ok(app.matchesFilter(staleCompleted, 'completed') && app.matchesFilter(staleCompleted, 'attention'));
+    const attention = app.render('AttentionSection', { session: staleCompleted });
+    assert.ok(find(attention, node => node.type === 'li' && node.children.some(child => /recheck the current files/i.test(child))));
+    assert.equal(find(attention, node => node.type === 'li' && node.children.some(child => /failed/i.test(child))), null);
+    const history = app.render('FailureHistorySection', { session: staleCompleted });
+    assert.ok(find(history, node => node.type === 'span' && node.children.includes('2 recovered tool-call failures')));
+    for (const validation of ['passed', 'not_required', 'not_run', 'failed', undefined]) {
+      const resolved = { ...staleCompleted, validation };
+      assert.ok(app.matchesFilter(resolved, 'completed') && !app.matchesFilter(resolved, 'attention'));
+      assert.equal(app.render('AttentionSection', { session: resolved }), null);
+    }
+    const idRow = section => find(section, node => node.type?.name === 'TaskIdentifier' && node.props.label === 'Conversation ID');
+    assert.equal(idRow(details)?.props.value, conversationId, 'A verified conversation ID remains available to copy.');
+    for (const other of [undefined, { ...goal, work_id: 'another-task' }, { ...goal, chatLink: undefined },
+      { ...goal, chatLink: { ...link, state: 'inactive' } }, { ...goal, chatLink: { ...link, state: 'conflicting_matches' } },
+      { ...goal, chatLink: { ...link, state: 'needs_attention' } }, { ...goal, chatLink: { ...link, version: 0 } },
+      { ...goal, chatLink: { ...link, conversationUrl: 'https://example.org/' } }]) {
+      const view = render(other);
+      assert.equal(open(view), null, 'Unbound, mismatched or untrusted links must not be actionable.');
+      const section = app.render('TaskDetailsSection', find(view, node => node.type?.name === 'TaskDetailsSection').props);
+      assert.equal(idRow(section), null, 'Task info must never offer an unverified or correlated ID to copy.');
+      if (other) {
+        assert.ok(find(view, node => node.type === 'p' && node.children.some(s => typeof s === 'string' && s.includes('Copy task brief'))),
+          'A Goal without a usable link needs a manual next step.');
+        assert.equal(find(view, node => node.children?.includes('ChatGPT conversation linked.')), null);
+        if (other.chatLink?.state === 'conflicting_matches') {
+          assert.ok(find(view, node => node.children?.includes('Multiple chats contain this task receipt. Automatic linking is paused.')));
+        }
+      }
+    }
+    assert.equal(app.requests.length + app.controls.length, 0, 'Neither handoff control should submit task content.');
     app.dispose();
   }
 

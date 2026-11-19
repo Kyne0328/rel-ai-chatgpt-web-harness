@@ -69,6 +69,22 @@ try {
     'file, diff layout and editor position must survive a hidden Tasks tab');
   assert.deepEqual(result.narrow, { stacked: true, fits: true, editorUsable: true },
     'embedded Changes must remain usable in a narrow container');
+  assert.deepEqual(result.currentFiles, [['src/new.js'], ['src/example.js'], [], []],
+    'assistive technology must see precisely the displayed file, not a pending or unlisted path');
+  assert.deepEqual(result.copiedPaths, ['src/new.js', 'src/example.js'], 'Copy path must track the loaded relative file path');
+  assert.deepEqual(result.fileStepper, { firstBounded: true, lastBounded: true, filteredHidden: true,
+    preserved: 'src/example.js', collapsedHidden: true }, 'navigation must follow only visible changed files without wrapping');
+  assert.deepEqual(result.reselectedFile, ['src/example.js', 'src/example.js', 'Copy file path: src/example.js'],
+    'a superseded diff must not replace the latest selection, its URL or clipboard target');
+  assert.deepEqual(result.stepperFocus, [true, true], 'Enter must preserve focus on the invoked stepper at either boundary');
+  assert.equal(result.missingFileCannotStep, true, 'an unresolved deep link must not choose an unrelated file');
+  assert.deepEqual(result.failedFile, { heading: 'src/new.js', permalink: 'src/example.js', offersCopy: false,
+    offersRetry: true, recovered: 'src/new.js' }, 'a failed listed file must be identifiable and retryable without claiming it loaded');
+  assert.equal(result.unlistedFileNotRetriable, true, 'a missing deep link must never gain a file retry action');
+  assert.deepEqual(result.refreshedSelection, ['src/new.js', 'src/new.js', 'Copy file path: src/new.js'],
+    'a passive task refresh must not replace a pending, listed selection with its old permalink');
+  assert.equal(result.missingFileHasNoProvenance, true, 'an unresolved path cannot claim a verified diff');
+  assert.equal(result.missingFileNotCopyable, true, 'an unresolved file from the URL must not be copyable');
   assert.equal(result.fileRoute, 'src/example.js', 'file selection must update the Tasks deep link');
   assert.deepEqual(result.legacy, {
     workspace: 'app', task: 'probe-task', file: 'src/new.js',
@@ -76,6 +92,11 @@ try {
   }, 'old #code URLs must redirect to the correct Tasks Changes tab without losing context');
   assert.equal(result.legacyDiscardedFrom, true, 'retired standalone-only URL parameters must be removed');
   assert.equal(result.historicalFallback, true, 'older tasks with unavailable original diffs retain an honest read-only fallback');
+  assert.deepEqual(result.mixedFileProvenance, ['Current files only', 'Read-only diff'],
+    'the diff toolbar must describe the selected file, not infer its provenance from a mixed inventory');
+  assert.deepEqual(result.liveMissingBase, { badge: 'Current files only',
+    notice: 'Git baseline unavailable. Showing the current file without a diff.', currentContent: true },
+    'an unavailable live baseline must not masquerade as an unchanged diff');
   assert.equal(result.missingFilePreserved, true, 'missing-file links retain their selected file and show a useful explanation');
   assert.deepEqual(result.processOwnership, { taskOwnedVisible: true, persistentVisible: true, unrelatedHidden: true },
     'Task Processes must show only commands attributed to the selected task');
@@ -91,6 +112,11 @@ try {
   assert.ok(result.taskDetailRetry.attempts >= 2, 'Retry must issue a fresh detail request for the same task');
   assert.equal(result.taskDetailRetry.recovered, true, 'Task detail Retry must recover without losing selection');
   assert.equal(result.mismatchedTaskRejected, true, 'a task-detail response for another task must be rejected');
+  assert.match(result.partialInventory[0], /partial file list/i, 'a bounded inventory must announce that its results are incomplete');
+  assert.doesNotMatch(result.partialInventory.slice(1).join(' '), /no (task-owned|recorded) (file )?changes/i);
+  assert.match(result.partialInventory[2], /incomplete/i);
+  assert.match(result.partialMissing, /not in the available portion/i, 'a capped list cannot disprove task ownership');
+  assert.match(result.emptyInventory[2], /no recorded file changes/i, 'a complete empty inventory remains distinguishable');
   console.log('Task-integrated Changes and task-context browser acceptance passed.');
 } finally {
   if (child && child.exitCode == null) child.kill('SIGKILL');

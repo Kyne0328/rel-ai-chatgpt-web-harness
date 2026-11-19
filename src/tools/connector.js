@@ -307,17 +307,31 @@ function compactForConnector(name, value, args = {}) {
 
 function compactReviewResult(value) {
   const sensitiveUnavailable = value.errorCode === 'SENSITIVE_REVIEW_UNAVAILABLE';
+  const mixed = new Set(Array.isArray(value.mixedOwnershipPaths) ? value.mixedOwnershipPaths : []);
+  const mixedReview = Array.isArray(value.reviewedFiles) && value.reviewedFiles.some(file => mixed.has(file));
   return pruneEmpty({
     ...compactRepositoryState(value),
     staged: value.staged,
     path: value.path,
     reviewScope: value.reviewScope || value.reviewedScope,
     reviewedScope: value.reviewedScope,
+    scopeGranularity: value.scopeGranularity === 'path' ? 'path' : undefined,
+    // Keep the warning, not extra paths or internal evidence from a saved review.
+    mixedOwnershipWarning: mixedReview ? 'A reviewed file contains both task and unrelated edits. Check individual hunks.' : undefined,
+    scopeUncertain: value.scopeUncertain === true ? true : undefined,
+    scopeWarning: value.scopeUncertain === true ? 'Change tracking is incomplete. Other files may have changed.' : undefined,
     reviewHash: value.reviewHash,
     reviewedFiles: value.reviewedFiles,
     excludedWorkspaceFiles: value.excludedWorkspaceFiles,
     excludedWorkspaceFilesComplete: value.excludedWorkspaceFilesComplete,
     diff: value.diff,
+    // Older saved reviews do not prove whether their diff was byte-limited.
+    diffTruncated: typeof value.diffTruncated === 'boolean' ? value.diffTruncated : undefined,
+    untrackedReadOmitted: typeof value.untrackedReadOmitted === 'boolean' ? value.untrackedReadOmitted : undefined,
+    warning: [
+      value.diffTruncated === true && 'This review contains a partial diff. Replay returns the same partial content; narrow the path or increase maxBytes on a new review.',
+      value.untrackedReadOmitted === true && 'Some untracked content could not be read. Run a new review when the file is available.'
+    ].filter(Boolean).join(' ') || undefined,
     // These producers expose only redacted key/status/availability metadata.
     // A missing marker, including an older replay, is not proof of redaction.
     sensitiveReview: value.sensitiveValuesReturned === false ? value.sensitiveReview : undefined,

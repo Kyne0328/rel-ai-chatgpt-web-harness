@@ -143,14 +143,16 @@ function conversationProjection() {
       ].slice(0, 8);
       // The command can span multiple content parts. Preserve the complete
       // command or nothing: a partial '/goal' must not pass as a bare command.
-      const textLimit = /^Continue goal /i.test(key === 0 ? value : parts[0] || '')
-        ? MAX_CONTINUATION_CHARS : MAX_COMMAND_CHARS;
+      const first = key === 0 ? value : parts[0];
+      const continuation = typeof first === 'string' && (/^Continue goal /i.test(first)
+        || /^Continue Loop work [A-Za-z0-9_-]{1,128} within this original brief: /.test(first));
+      const textLimit = continuation ? MAX_CONTINUATION_CHARS : MAX_COMMAND_CHARS;
       if (typeof value !== 'string' || key >= 8 || value.length > textLimit) {
         if (key === 0 || parts.length) { parts.length = 0; message.content.commandInvalid = true; }
         return;
       }
       if (message.content.commandInvalid) return;
-      if (key === 0 && (/^\s*\/(?:goal|loop)(?:\s|$)/i.test(value) || /^Continue goal /i.test(value))) {
+      if (key === 0 && (/^\s*\/(?:goal|loop)(?:\s|$)/i.test(value) || continuation)) {
         parts[0] = value;
       } else if (key > 0 && parts.length && key === parts.length
         && parts.join('\n').length + value.length + 1 <= textLimit) {

@@ -2,6 +2,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { dashboardTaskSession } from '../src/core/dashboard-runtime.ts';
+import { createStdioPrincipal, principalFingerprint } from '../src/mcp/principal.ts';
+import { workspaceHistory } from '../src/tools/history.ts';
 import { flushAuditWrites, readAudit, safeLogAudit } from '../src/audit.js';
 import { getTaskHistoryDir, listRecentSessionEventPage, listSessionSummaryPage, readSession, writeSession } from '../src/taskHistoryStorage.ts';
 import { recordTaskIntegrityEvent, readTaskIntegrity } from '../src/taskIntegrity.ts';
@@ -72,6 +75,42 @@ try {
   const activityNext = listRecentSessionEventPage(directory, { workspace: 'repo', principalFingerprint: 'owner-a', cursor: activity.items[0]._pageCursor });
   assert.equal(activityNext.items.length, 1);
   assert.notEqual(activityNext.items[0].eventId, activity.items[0].eventId);
+
+  // Imported activity can lack a clock time. SQLite sorts those rows last;
+  // '' must round-trip as a real cursor position on both public read paths.
+  const principal = createStdioPrincipal();
+  const taskId = 'untimed-history';
+  writeSession(directory, { id: taskId, workspace: 'repo', principalFingerprint: principalFingerprint(principal),
+    status: 'completed', events: [{ eventId: 'oldest-index' }, { eventId: 'newer-index' },
+      { eventId: 'dated', timestamp: '2026-10-05T01:00:00.000Z' }] });
+  const configPath = path.join(stateDir, 'fixture-config.json');
+  const previousConfig = process.env.REL_AI_MCP_CONFIG;
+  fs.writeFileSync(configPath, JSON.stringify({ ...config, version: 7 }));
+  process.env.REL_AI_MCP_CONFIG = configPath;
+  try {
+    for (const read of [
+      cursor => {
+        const page = workspaceHistory(config, { workspace: 'repo', kind: 'activity', taskId, limit: 1, cursor }, { principal });
+        return [page.entries, page.cursor, page.hasMore];
+      },
+      cursor => {
+        const { entries, page } = dashboardTaskSession(taskId, { activityLimit: 1, activityOnly: true, activityCursor: cursor }).activity;
+        return [entries, page.nextCursor, page.hasMore];
+      }
+    ]) {
+      let cursor;
+      for (const [id, more] of [['dated', true], ['newer-index', true], ['oldest-index', false]]) {
+        const [entries, next, hasMore] = read(cursor);
+        assert.deepEqual([entries.map(event => event.eventId), hasMore], [[id], more], 'dated and untimed activity must page exactly once and terminate');
+        cursor = next;
+      }
+      assert.deepEqual(read(cursor)[0], []);
+    }
+  } finally {
+    if (previousConfig === undefined) delete process.env.REL_AI_MCP_CONFIG;
+    else process.env.REL_AI_MCP_CONFIG = previousConfig;
+  }
+
   console.log('Audit ingestion, full/tail/rotation replay, durable counters, scoped history and per-row continuation cursors passed.');
 } finally {
   await flushAuditWrites(config.auditLogPath);

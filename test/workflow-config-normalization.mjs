@@ -1,3 +1,4 @@
+import { setupWizard } from '../src/productUx.js';
 import { updateWorkspace } from "../src/configEditor.js";
 import { getReleaseNotes } from "../src/releaseNotes.js";
 import assert from 'node:assert/strict';
@@ -6,6 +7,13 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { normalizeConfig, ensureConfig, invalidateConfigCache, readConfig, writeConfig } from "../src/config.js";
+
+// Suggestions are copyable shell commands: a normal checkout path, including
+// spaces and an apostrophe, must stay a single argument on the host's shell.
+const suggestedPath = path.resolve("Team's Project");
+const suggested = setupWizard({ alias: 'example', workspacePath: suggestedPath, generateToken: false });
+const escapedPath = process.platform === 'win32' ? suggestedPath.replace("'", "''") : suggestedPath.replace("'", "'\\''");
+assert.ok(suggested.nextCommands.includes(`npm run workspace:add -- 'example' '${escapedPath}'`));
 
 const exampleConfig = JSON.parse(fs.readFileSync(path.resolve('examples/config.example.json'), 'utf8'));
 assert.equal(exampleConfig.auditLogPath, '', 'the portable example must not mix Windows and Unix path syntax');

@@ -403,7 +403,7 @@ for (const streamId of ['a', 'b']) {
     },
     changedTextFiles: workspace => workspace.changedFiles,
     taskId: task => task?.work_id || '',
-    setWorkspace() {}, setWorkspaceError() {}, setWorkspaceLoading() {}, setFilePath() {},
+    setWorkspace() {}, setWorkspaceError() {}, setWorkspaceLoading() {}, setFilePath() {}, setFailedPath() {},
     setDiffFile: file => { displayed = file; },
     setViewerMessage() {}, setViewerTone() {}, replaceRouteParams() {},
     emptyViewerMessage: () => '', messageFor: String
@@ -482,6 +482,7 @@ for (const streamId of ['a', 'b']) {
 {
   const model = await import('../src/ui/features/workspaces/model.js');
   const input = await import('../src/ui/workspace-input.js');
+  const { DASHBOARD_DATA_URL, reconcileUnconfirmedResult } = await import('../src/ui/api.js');
   const flatten = node => !node || typeof node !== 'object' ? [] : Array.isArray(node)
     ? node.flatMap(flatten) : [node, ...flatten(node.children)];
   const requests = [];
@@ -496,7 +497,7 @@ for (const streamId of ['a', 'b']) {
     workSessionStateView: () => ({}), routeHref: () => '#tasks',
     getWorkspaceFilter: () => routeWorkspace, setWorkspaceFilter: value => { routeWorkspace = value; },
     invalidateCache: () => { invalidated++; }, requestDashboardRefresh: () => { refreshed++; },
-    reconcileUnconfirmedResult: result => result,
+    DASHBOARD_DATA_URL, reconcileUnconfirmedResult: (result, verify) => reconcileUnconfirmedResult(result, verify, { attempts: 1 }),
     postJson: (url, body) => new Promise(resolve => requests.push({ url, body, resolve })),
     fetchJson: url => new Promise(resolve => preflights.push({ url, resolve }))
   };
@@ -565,6 +566,117 @@ for (const streamId of ['a', 'b']) {
     requests[0].resolve({ ok: true });
     await retry;
     assert.equal(closed, closedBefore + 1, 'successful retry closes exactly once');
+  }
+
+  // A completed drop adds to the current, editable draft, not the list it started with.
+  for (const surface of ['desktop', 'manual']) {
+    slots = new Map(); requests.length = 0; preflights.length = 0;
+    context.document.documentElement.dataset.surface = surface;
+    const workspace = { alias: 'fixture', path: '/first', sourcePaths: ['/first', '/second', '/remove'] };
+    const formTree = () => render('ProjectFormModal', { mode: 'edit', workspace });
+    const sourceProps = () => flatten(formTree()).find(node => node.type === context.components.SourceFolders).props;
+    const folders = () => flatten(render('SourceFolders', sourceProps()));
+    const drop = path => folders().find(node => node.props.onDrop).props.onDrop({ preventDefault() {}, dataTransfer: { files: [{ name: path }] } });
+    drop('/add-one'); drop('/add-two');
+    if (surface === 'desktop') {
+      const remove = folders().find(node => node.props['aria-label'] === 'Remove source folder /remove');
+      assert.equal(remove.props.disabled, false);
+      remove.props.onClick();
+    } else {
+      folders().find(node => node.type === 'textarea').props.onChange({ target: { value: '/second\n/first' } });
+    }
+    for (const index of [1, 0]) preflights[index].resolve({ ok: true, isDirectory: true });
+    await flush();
+    const primary = surface === 'desktop' ? ['/first', '/second'] : ['/second', '/first'];
+    const expected = [...sourceProps().paths];
+    assert.deepEqual(expected.slice(0, primary.length), primary, 'a drop must not restore a removal or reverse a manual edit');
+    assert.deepEqual(expected.slice(primary.length), ['/add-one', '/add-two'], 'both verified drops survive in gesture order');
+    const saving = flatten(formTree()).find(node => node.type === 'form').props.onSubmit({ preventDefault() {} });
+    assert.deepEqual([...requests[0].body.sourcePaths], expected, 'the mutation must contain the displayed primary and ordered roots');
+    requests[0].resolve({ ok: true }); await saving;
+  }
+  // The first valid gesture, not the fastest preflight, supplies a new project's command root.
+  for (const firstValid of [true, false]) {
+    slots = new Map(); requests.length = 0; preflights.length = 0;
+    context.document.documentElement.dataset.surface = 'desktop';
+    const tree = () => render('ProjectFormModal', { mode: 'add' });
+    flatten(tree()).find(node => node.props.name === 'alias').props.onChange({ target: { value: 'fixture' } });
+    const source = () => flatten(tree()).find(node => node.type === context.components.SourceFolders).props;
+    const drop = path => flatten(render('SourceFolders', source())).find(node => node.props.onDrop)
+      .props.onDrop({ preventDefault() {}, dataTransfer: { files: [{ name: path }] } });
+    drop('/first-choice'); drop('/second-choice');
+    assert.equal(preflights.length, 2, 'independent validations start without waiting for each other');
+    preflights[1].resolve({ ok: true, isDirectory: true }); await flush();
+    assert.equal(source().paths.length, 0, 'a pending earlier gesture must not expose an unconfirmed default primary');
+    preflights[0].resolve({ ok: firstValid, isDirectory: firstValid }); await flush();
+    const expected = firstValid ? ['/first-choice', '/second-choice'] : ['/second-choice'];
+    assert.deepEqual([...source().paths], expected);
+    const saving = flatten(tree()).find(node => node.type === 'form').props.onSubmit({ preventDefault() {} });
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].body.path, expected[0]);
+    assert.deepEqual([...requests[0].body.sourcePaths], expected);
+    requests[0].resolve({ ok: true }); await saving;
+  }
+
+  // A failed save retires its old drop batch. Its outstanding lookup must not delay the next draft.
+  {
+    slots = new Map(); requests.length = 0; preflights.length = 0;
+    const workspace = { alias: 'fixture', path: '/base' };
+    const tree = () => render('ProjectFormModal', { mode: 'edit', workspace });
+    const source = () => flatten(tree()).find(node => node.type === context.components.SourceFolders).props;
+    const drop = path => flatten(render('SourceFolders', source())).find(node => node.props.onDrop)
+      .props.onDrop({ preventDefault() {}, dataTransfer: { files: [{ name: path }] } });
+    drop('/retired');
+    const saving = flatten(tree()).find(node => node.type === 'form').props.onSubmit({ preventDefault() {} });
+    requests[0].resolve({ ok: false, error: 'Fixture rejected save' }); await saving;
+    drop('/current');
+    preflights[1].resolve({ ok: true, isDirectory: true }); await flush();
+    assert.deepEqual([...source().paths], ['/base', '/current']);
+    preflights[0].resolve({ ok: true, isDirectory: true }); await flush();
+    assert.deepEqual([...source().paths], ['/base', '/current'], 'late retired gesture stays retired');
+    assert.equal(requests.length, 1);
+  }
+
+  // A picker opened while a drop is being validated must not discard the admitted folder either.
+  slots = new Map(); requests.length = 0; preflights.length = 0;
+  context.document.documentElement.dataset.surface = 'desktop';
+  {
+    const workspace = { alias: 'fixture', path: '/original' };
+    const props = () => flatten(render('ProjectFormModal', { mode: 'edit', workspace })).find(node => node.type === context.components.SourceFolders).props;
+    const folders = () => flatten(render('SourceFolders', props()));
+    folders().find(node => node.props.onDrop).props.onDrop({ preventDefault() {}, dataTransfer: { files: [{ name: '/added' }] } });
+    folders().find(node => node.props['aria-label'] === 'Change source folder /original').props.onClick();
+    preflights[0].resolve({ ok: true, isDirectory: true }); await flush();
+    requests[0].resolve({ ok: true, path: '/replacement' }); await flush();
+    assert.deepEqual([...props().paths], ['/replacement', '/added']);
+  }
+  context.document.documentElement.dataset.surface = '';
+  // A timeout is not a successful primary-folder change merely because the intended path was already a secondary.
+  const original = { alias: 'fixture', path: '/first', sourcePaths: ['/first', '/second', '/third', '/fourth'] };
+  for (const mode of ['edit', 'repair']) for (const result of ['unchanged', 'wrong-order', 'exact']) {
+    slots = new Map(); requests.length = 0; preflights.length = 0;
+    const before = closed;
+    const props = { mode, workspace: original, onClose: () => { closed++; } };
+    const tree = () => render(mode === 'repair' ? 'RepairProjectModalContent' : 'ProjectFormModal', props);
+    const expected = mode === 'repair' ? ['/second', '/third', '/fourth'] : ['/second', '/first', '/third', '/fourth'];
+    if (mode === 'repair') {
+      flatten(tree()).find(node => node.type === 'input' && node.props.name === 'path').props.onChange({ target: { value: '/second' } });
+    } else {
+      const source = flatten(tree()).find(node => node.type === context.components.SourceFolders);
+      flatten(render('SourceFolders', source.props)).find(node => node.type === 'textarea').props.onChange({ target: { value: expected.join('\n') } });
+    }
+    const saving = flatten(tree()).find(node => node.type === 'form').props.onSubmit({ preventDefault() {} });
+    assert.equal(requests[0].body.path, '/second');
+    requests[0].resolve({ ok: false, outcomeUnknown: true, error: 'Fixture reply lost' });
+    await flush();
+    assert.equal(preflights.length, 1); assert.equal(preflights[0].url, DASHBOARD_DATA_URL);
+    const sourcePaths = result === 'wrong-order' ? [...expected.slice(0, -2), ...expected.slice(-2).reverse()] : expected;
+    const saved = result === 'unchanged' ? original : { ...original, path: '/second', sourcePaths };
+    preflights[0].resolve({ ok: true, config: { workspaces: [saved] } });
+    await saving;
+    assert.equal(closed, before + Number(result === 'exact'), mode + ': only the intended primary and ordered source list can verify a lost reply');
+    assert.equal(requests.length, 1, 'readback must never replay a workspace mutation');
+    if (result !== 'exact') assert.ok(flatten(tree()).some(node => node.props.role === 'alert' && node.children.includes('Fixture reply lost')));
   }
 
   // Drop validation begun before a save cannot modify the unlocked draft later.
@@ -728,6 +840,176 @@ for (const streamId of ['a', 'b']) {
   toolbar.onWorkspaceChange('');
   await load();
   assert.equal(routeWorkspace, ''); assert.equal(requested.at(-1), '');
+}
+
+
+{
+  // Exercise the actual viewer and loader with synthetic script events. No
+  // network, Monaco worker or real desktop is used to simulate asset outages.
+  const source = read('src/ui/features/code/react.js');
+  const slots = [], effects = [], scripts = [];
+  let cursor = 0, currentScript = null, editorStarts = 0;
+  const window = {};
+  const document = {
+    querySelector: () => currentScript,
+    createElement() {
+      const listeners = new Map();
+      return { dataset: {}, listeners,
+        addEventListener: (name, fn) => listeners.set(name, fn),
+        removeEventListener: (name, fn) => { if (listeners.get(name) === fn) listeners.delete(name); },
+        remove() { if (currentScript === this) currentScript = null; }
+      };
+    },
+    head: { appendChild(script) { currentScript = script; scripts.push(script); } }
+  };
+  const h = (type, props, ...children) => typeof type === 'function' ? type(props) : { type, props: props || {}, children };
+  const context = { window, document, h, toast() {}, messageFor: String, currentMonacoTheme: () => 'fixture',
+    bindEditorTheme: () => () => {}, bindEditorResize: () => () => {}, applyDiffModels() {}, clearDiffModels() {},
+    useRef(value) { const i = cursor++; return slots[i] ||= { current: value }; },
+    useState(value) { const i = cursor++; slots[i] ||= { value }; return [slots[i].value, v => { slots[i].value = typeof v === 'function' ? v(slots[i].value) : v; }]; },
+    useEffect(fn, deps) {
+      const i = cursor++, old = slots[i];
+      if (old && old.deps.every((item, k) => Object.is(item, deps[k]))) return;
+      effects.push(() => { old?.cleanup?.(); slots[i] = { deps, cleanup: fn() }; });
+    }
+  };
+  vm.runInNewContext('let monacoPromise = null;\n' + ['loadMonaco', 'MonacoDiffViewer', 'DiffFallback', 'FallbackColumn']
+    .map(name => functionSource(source, name)).join('\n') + '\nglobalThis.viewer = MonacoDiffViewer; globalThis.load = loadMonaco;', context);
+  const props = { file: { path: 'sample.txt', baseContent: 'before', content: 'after' }, layout: 'unified' };
+  const render = () => {
+    cursor = 0;
+    const tree = context.viewer(props);
+    if (tree.props.ref) tree.props.ref.current = {};
+    while (effects.length) effects.shift()();
+    return tree;
+  };
+  const nodes = node => !node || typeof node !== 'object' ? [] : [node, ...(node.children || []).flatMap(nodes)];
+  const fallback = tree => nodes(tree).filter(n => n.type === 'pre').map(n => n.children.join(''));
+  const retry = tree => nodes(tree).find(n => n.type === 'button');
+  const settle = () => new Promise(resolve => setImmediate(resolve));
+  render();
+  const first = context.load();
+  assert.equal(first, context.load());
+  scripts[0].listeners.get('error')();
+  await assert.rejects(first, /assets could not load/); await settle();
+  let tree = render();
+  assert.deepEqual(fallback(tree), ['before', 'after']);
+  assert.equal(scripts.length, 1, 'rerenders cannot retry failed assets automatically');
+  const failedRetry = retry(tree).props.onClick();
+  assert.equal(retry(render()).props.disabled, true);
+  assert.deepEqual(fallback(render()), ['before', 'after'], 'text stays accessible while retrying');
+  scripts[1].listeners.get('error')(); await failedRetry;
+  tree = render();
+  assert.deepEqual(fallback(tree), ['before', 'after']);
+  assert.equal(currentScript, null);
+  assert.equal(scripts.length, 2);
+  const recovery = retry(tree).props.onClick();
+  const shared = context.load();
+  assert.equal(scripts.length, 3);
+  window.require = Object.assign((_modules, ready) => {
+    window.monaco = { editor: { createDiffEditor() { editorStarts++; return {}; } } };
+    ready();
+  }, { config() {} });
+  currentScript.listeners.get('load')();
+  assert.equal(await shared, window.monaco);
+  await recovery; render(); await settle();
+  assert.equal(editorStarts, 1, 'the retained viewer restores the editor exactly once after explicit retry');
+  assert.ok(scripts.every(script => script.listeners.size === 0), 'settled attempts retain no script handlers');
+  assert.equal(await context.load(), window.monaco);
+  assert.equal(scripts.length, 3, 'successful reopens reuse the initialized editor');
+  slots.forEach(slot => slot?.cleanup?.());
+}
+
+
+{
+  // The desktop can confirm an edit before the settings projection is readable.
+  const slots = [], effects = [], reads = [], notes = [], placeholder = 'synthetic-fixture-value';
+  let cursor = 0, saves = 0, refreshes = 0, liveStatus, rejectSave = false;
+  const initial = { port: 3333, tunnelId: 'tunnel_fixtureA123', tunnelLabel: 'Original', additionalTunnels: [] };
+  const desktop = {
+    getSettings: () => new Promise((resolve, reject) => reads.push({ resolve, reject })),
+    saveSettings() {}, onStatus: fn => { liveStatus = fn; return () => {}; },
+    saveTunnel: async () => { saves++; return rejectSave
+      ? { ok: false, error: placeholder } : { ok: true, saved: true, connections: [], statuses: [] }; }
+  };
+  const h = (type, props, ...children) => ({ type, props: props || {}, children });
+  const context = { h, desktop, window: { relaiDesktop: desktop, addEventListener() {}, removeEventListener() {} },
+    TunnelConnections: 'tunnels', SettingsField: 'field', tunnelCredentialError: () => '', connectionSnapshot: value => String(value.port),
+    useState(initial) {
+      const i = cursor++; slots[i] ||= { value: initial };
+      return [slots[i].value, v => { slots[i].value = typeof v === 'function' ? v(slots[i].value) : v; }];
+    },
+    useRef(value) { const i = cursor++; return slots[i] ||= { current: value }; },
+    useEffect(fn, deps) {
+      const i = cursor++, old = slots[i];
+      if (old && deps.every((value, j) => Object.is(value, old.deps[j]))) return;
+      effects.push(() => { old?.cleanup?.(); slots[i] = { deps, cleanup: fn() }; });
+    }
+  };
+  vm.runInNewContext(functionSource(settingsReact, 'DesktopConnectionSettings') + '\nglobalThis.page = DesktopConnectionSettings;', context);
+  const render = () => { cursor = 0; const tree = context.page({ expanded: true }); while (effects.length) effects.shift()(); return tree; };
+  const nodes = el => !el || typeof el !== 'object' ? [] : [el, ...(el.children || []).flatMap(nodes)];
+  const tunnel = tree => nodes(tree).find(node => node.type === 'tunnels');
+  const port = tree => nodes(tree).find(node => node.props?.id === 'port');
+  const settle = () => new Promise(resolve => setImmediate(resolve));
+  render(); reads[0].resolve(initial); await settle();
+  port(render()).props.onChange({ currentTarget: { value: '3456' } });
+  const draft = { originalTunnelId: initial.tunnelId, tunnelId: initial.tunnelId, label: 'Updated', apiKey: placeholder };
+  let open = true, submittedKey = draft.apiKey;
+  const addStart = settingsReact.indexOf('  const add = async () => {', settingsReact.indexOf('function TunnelConnections'));
+  const addEnd = settingsReact.indexOf('  const remove = async connection => {', addStart);
+  const addContext = { desktop, draft, disabled: false, busyRef: { current: false }, rows: [], connections: [], statuses: [],
+    validateAdditionalTunnel: () => null, setBusy() {}, setValidation() {}, setShowSecret() {},
+    resetDraft() { submittedKey = ''; }, setOpen: value => { open = value; },
+    onChange: tunnel(render()).props.onChange, requestDashboardRefresh() { refreshes++; }, messageOf: String,
+    toast: text => notes.push(text) };
+  vm.runInNewContext(settingsReact.slice(addStart, addEnd) + '\nglobalThis.submit = add;', addContext);
+  await addContext.submit();
+  assert.equal(open, false); assert.equal(submittedKey, '', 'confirmed edits clear the form before readback settles');
+  assert.equal(saves, 1); assert.equal(refreshes, 1); assert.equal(reads.length, 2);
+  assert.equal(tunnel(render()).props.disabled, true);
+  reads[1].reject(new Error(placeholder)); await settle();
+  const failed = render();
+  const retry = nodes(failed).find(node => node.type === 'button' && node.children.includes('Reload connection list'));
+  assert.ok(retry, 'a failed projection offers a read-only retry, not Save again');
+  assert.ok(!JSON.stringify(failed).includes(placeholder) && !notes.join(' ').includes(placeholder));
+  const retried = retry.props.onClick();
+  assert.equal(reads.length, 3);
+  const newestStatuses = [{ tunnelId: initial.tunnelId, state: 'available' }];
+  liveStatus({ additionalTunnelStatuses: newestStatuses });
+  reads[2].resolve({ ...initial, port: 3333, tunnelLabel: 'Updated', additionalTunnelStatuses: [] }); await retried;
+  const recovered = render();
+  assert.equal(tunnel(recovered).props.primary.label, 'Updated');
+  assert.deepEqual(tunnel(recovered).props.statuses, newestStatuses, 'a late native snapshot must not undo a newer status event');
+  assert.equal(tunnel(recovered).props.disabled, false);
+  assert.equal(port(recovered).props.value, 3456, 'refresh must preserve unrelated unsaved port edits');
+  assert.equal(saves, 1, 'retry must not replay the native edit');
+
+  rejectSave = true; open = true; submittedKey = placeholder;
+  await addContext.submit();
+  assert.equal(open, true); assert.equal(submittedKey, placeholder, 'an explicit save rejection keeps the editable input');
+  assert.equal(reads.length, 3); assert.equal(refreshes, 1);
+  assert.ok(!notes.join(' ').includes(placeholder), 'a rejected bridge message cannot echo a submitted key');
+
+  const removeEnd = settingsReact.indexOf("  return h('section', { className: 'additional-tunnels'", addEnd);
+  assert.ok(removeEnd > addEnd);
+  for (const [removed, cleanupOk] of [[false, false], [true, false], [true, true]]) {
+    let readbacks = 0, refreshed = 0, cleared = 0;
+    const reports = [];
+    const removeContext = {
+      disabled: false, busyRef: { current: false }, draft, confirmAction: async () => true,
+      desktop: { removeTunnel: async () => ({ ok: cleanupOk, removed, connections: [], statuses: [] }) },
+      setBusy() {}, setOpen() {}, resetDraft() { cleared++; }, onChange() { readbacks++; },
+      requestDashboardRefresh() { refreshed++; }, toast: (_text, { variant }) => reports.push(variant), messageOf: String
+    };
+    vm.runInNewContext(settingsReact.slice(addEnd, removeEnd) + '\nglobalThis.erase = remove;', removeContext);
+    await removeContext.erase({ tunnelId: initial.tunnelId, label: 'Fixture' });
+    assert.equal(readbacks, Number(removed), 'an explicit rejection must not overwrite the list with empty fallback arrays');
+    assert.equal(refreshed, Number(removed)); assert.equal(cleared, Number(removed));
+    assert.equal(reports.at(-1), !removed ? 'error' : cleanupOk ? 'success' : 'warn');
+  }
+
+  slots.forEach(slot => slot?.cleanup?.());
 }
 
 console.log('Dashboard live rendering contracts passed.');

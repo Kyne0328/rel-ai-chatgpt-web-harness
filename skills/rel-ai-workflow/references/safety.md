@@ -12,6 +12,16 @@ Never bypass or simulate user consent. Workspace-wide reset and clearing the sav
 
 Prefer focused edits or `relai_changes` action `restore` for listed tracked paths. Workspace-wide reset is no longer an MCP action; do not recreate it through a command as a shortcut around removed approval. Review existing uncommitted changes first.
 
+### Parallel Git worktrees
+
+Give each editing task a separate authorized worktree and record its path and starting commit. Before retiring one, stop its writers and check:
+
+- `git worktree list --porcelain`: match the exact path and HEAD to the task record; verify ownership with the task owner. Leave the primary checkout, locked trees, and trees used by another task in place.
+- In that worktree, run `git status --short --untracked-files=normal --ignored=matching --ignore-submodules=none`. Inspect staged and unstaged edits, untracked or ignored entries, and changed submodules locally. A directory entry can stand for many files; an ignored file is not necessarily disposable.
+- For a detached HEAD, run `git for-each-ref --contains HEAD --format="%(refname)" refs/heads refs/tags`. Empty output means no local branch or tag retains that commit. A clean working tree does not establish that the result was delivered.
+
+Verify the intended work in its destination or a recoverable copy, including any files not tracked by Git. A review checkpoint is not a backup. If ownership, preservation, or authorization is uncertain, leave the worktree in place. Do not force removal.
+
 ## Command execution
 
 Use `relai_exec` for bounded one-shot development commands and `relai_process` for persistent or interactive commands. Do not use either as an unrestricted command router. Respect configured workspace, environment, timeout, output, cancellation, and process-tree limits. If a finite task operation stalls, prefer `relai_work` action `stop` for the specific `operationId` when known, or omit `operationId` to stop the task's current finite operations while leaving the task open. Use `cancel` only when the logical task itself should end; managed persistent processes are stopped separately with `relai_process`. A successful command and a validation result are different evidence types. Use `relai_validate` when structured validation evidence is useful; neither is a universal permission prerequisite for completion.

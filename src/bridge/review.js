@@ -68,9 +68,14 @@ async function relaiDiff(workspace, config, args = {}, context = {}) {
   const pathScoped = reviewedScope === 'task' || filterPath != null || sensitivePaths.length > 0;
   const diff = await runOrdinaryDiff(workspace, config, staged, ordinaryPaths, pathScoped, context.signal, maxBytes);
   let diffText = diff.stdout || '';
+  let diffTruncated = diff.stdoutTruncated === true || diff.stdoutSpillTruncated === true;
+  let untrackedReadOmitted = false;
   if (!staged) {
     const untracked = new Set(ownership.entries.filter(entry => entry.untracked && !isSecretPath(entry.path)).map(entry => entry.path));
-    diffText += buildUntrackedDiff(workspace, changedPaths.filter(file => untracked.has(file)), Math.max(0, maxBytes - Buffer.byteLength(diffText)));
+    const preview = buildUntrackedDiff(workspace, changedPaths.filter(file => untracked.has(file)), Math.max(0, maxBytes - Buffer.byteLength(diffText)));
+    diffText += preview.text;
+    diffTruncated ||= preview.truncated;
+    untrackedReadOmitted = preview.readOmitted;
   }
   const sensitiveReview = redactSensitive
     ? await buildSensitiveReview(workspace, config, sensitivePaths, ownership, staged, context)
@@ -78,6 +83,7 @@ async function relaiDiff(workspace, config, args = {}, context = {}) {
   const reviewedFiles = normalizePaths(changedPaths);
   const mixedOwnershipPaths = normalizePaths(args._mixedOwnershipPaths || []).filter(file => reviewedFiles.includes(file));
   const scopedOwnership = scopeOwnership(ownership, new Set(reviewedFiles));
+  const boundedDiff = truncateDiff(diffText, maxBytes);
   const reviewHash = crypto.createHash("sha256").update(diffText).update(JSON.stringify(sensitiveReview)).digest("hex");
   return {
     ok: stat.exitCode === 0 && diff.exitCode === 0 && sensitiveReview.every(entry => entry.availability !== 'unavailable'),
@@ -91,7 +97,7 @@ async function relaiDiff(workspace, config, args = {}, context = {}) {
       mixedOwnershipPaths,
       ...(mixedOwnershipPaths.length ? { mixedOwnershipWarning: 'Paths with mixed ownership include all their hunks. Path filtering cannot separate task changes from unrelated changes within one file.' } : {}),
       ...(args._scopeUncertain === true ? { scopeUncertain: true,
-        scopeWarning: 'Validation or edit mutation evidence is incomplete; other changes may exist. Do not assume this scoped review proves no other files changed.' } : {}),
+        scopeWarning: 'Task change tracking is incomplete; other changes may exist. Do not assume this scoped review proves no other files changed.' } : {}),
       ...(args._validationObservation ? { validationMutationEvidence: args._validationObservation } : {})
     } : {}),
     reviewHash,
@@ -108,7 +114,9 @@ async function relaiDiff(workspace, config, args = {}, context = {}) {
     untrackedSessionFiles: scopedOwnership.untrackedSession,
     untrackedBaselineFiles: scopedOwnership.untrackedBaseline,
     ...(ownership.baselineSource ? { baselineSource: ownership.baselineSource } : {}),
-    diff: truncateDiff(diffText, maxBytes),
+    diff: boundedDiff,
+    diffTruncated: diffTruncated || boundedDiff !== diffText,
+    untrackedReadOmitted,
     sensitiveReview,
     ...(sensitiveReview.some(entry => entry.availability === 'unavailable') ? { error: 'Sensitive review evidence is unavailable or incomplete; no key changes were inferred for unavailable versions.', errorCode: 'SENSITIVE_REVIEW_UNAVAILABLE' } : {}),
     sensitiveValuesReturned: false,

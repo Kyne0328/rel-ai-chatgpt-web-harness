@@ -27,6 +27,12 @@ const runtimeStates = new Map();
 const workerClients = new Map();
 
 async function ensureRepositoryIndex(workspace, config = {}, options = {}) {
+  const index = await ensureScopedRepositoryIndex(workspace, config, options);
+  // Cache entries are shared by equivalent scopes; the public label belongs to the caller.
+  return { ...index, workspace: workspace.alias };
+}
+
+async function ensureScopedRepositoryIndex(workspace, config, options) {
   throwIfAborted(options.signal);
   const databaseFile = repositoryIndexPath(config, workspace);
   const state = runtimeState(databaseFile);
@@ -82,7 +88,15 @@ async function recoverRepositoryIndex(workspace, config = {}, options = {}) {
 }
 
 function noteRepositoryMutation(workspace, config = {}, paths = []) {
-  const state = runtimeState(repositoryIndexPath(config, workspace));
+  const databaseFile = repositoryIndexPath(config, workspace);
+  runtimeState(databaseFile);
+  const repositoryDirectory = path.dirname(path.dirname(databaseFile));
+  for (const [file, state] of runtimeStates) {
+    if (path.dirname(path.dirname(file)) === repositoryDirectory) markScopeChanged(state, paths);
+  }
+}
+
+function markScopeChanged(state, paths) {
   clearZoektReconcile(state);
   state.changeRevision += 1;
   state.dirty = true;
@@ -118,7 +132,7 @@ function repositoryIndexStatus(workspace, config = {}) {
     lastError: state.lastError,
     lastFullScanAt: isoTime(state.lastFullScanAt),
     lastReconciledAt: isoTime(state.lastReconciledAt),
-    metadata: state.metadata ? decorateMetadata(state, state.metadata) : null,
+    metadata: state.metadata ? { ...decorateMetadata(state, state.metadata), workspace: workspace.alias } : null,
     diagnostics: recentIntelligenceDiagnostics(workspace)
   };
 }

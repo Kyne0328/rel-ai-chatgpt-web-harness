@@ -350,6 +350,53 @@ try {
     ['open-inactive'],
     'the storage budget must prune terminal history before resumable nonterminal work'
   );
+
+  // A one-byte overage only requires the oldest usable terminal record.
+  // Witness payload bytes crossing the SQLite/JS boundary, not elapsed wall time.
+  const retentionFixture = withStateDatabase(pruneConfig, db => {
+    const stamp = Date.now();
+    const insert = db.prepare('INSERT INTO task_history(id,updated_at_ms,payload) VALUES(?,?,?)');
+    for (let i = 0; i < 64; i++) {
+      const id = 'budget-' + String(i).padStart(2, '0');
+      insert.run(id, stamp, JSON.stringify({ version: i === 63 ? 99 : 3, id, taskId: id, sessionId: id,
+        workspace: 'app', status: 'completed', events: [{ eventId: 'old', summary: 'budget-payload-' + 'x'.repeat(2048) }] }));
+    }
+    // An event rotated out of the canonical snapshot still contributes to the budget.
+    const id = 'budget-62';
+    db.prepare('UPDATE task_history SET payload=? WHERE id=?').run(JSON.stringify({
+      version: 3, id, taskId: id, sessionId: id, workspace: 'app', status: 'completed',
+      events: [{ eventId: 'new', summary: 'budget-payload-rotated' }]
+    }), id);
+    const total = db.prepare('SELECT SUM(bytes) AS n FROM task_history_storage_usage').get().n;
+    const historicalBytes = db.prepare('SELECT SUM(length(CAST(payload AS BLOB))) AS n FROM task_history_events WHERE task_id=?').get(id).n;
+    const sessionBytes = db.prepare('SELECT bytes FROM task_history_summaries WHERE id=?').get(id).bytes;
+    return { total, expected: total - sessionBytes - historicalBytes, statement: Object.getPrototypeOf(insert) };
+  }, { transaction: true });
+  const original = { get: retentionFixture.statement.get, all: retentionFixture.statement.all };
+  let loadedBytes = 0;
+  try {
+    for (const method of ['get', 'all']) retentionFixture.statement[method] = function(...args) {
+      const result = original[method].apply(this, args);
+      for (const row of Array.isArray(result) ? result : [result]) {
+        for (const value of Object.values(row || {})) {
+          if (typeof value === 'string' && value.includes('budget-payload-')) loadedBytes += Buffer.byteLength(value);
+        }
+      }
+      return result;
+    };
+    pruneSessions(pruneDirectory, { storageBudgetBytes: retentionFixture.total - 1 });
+  } finally {
+    Object.assign(retentionFixture.statement, original);
+  }
+  assert.ok(loadedBytes < 32768, 'a tiny budget overage must not materialize the full 64-session history');
+  withStateDatabase(pruneConfig, db => {
+    const has = id => Boolean(db.prepare('SELECT 1 FROM task_history WHERE id=?').get(id));
+    assert.ok(has('open-inactive') && has('budget-63') && has('budget-61'), 'preserve open, invalid, and newer records');
+    assert.equal(has('budget-62'), false, 'ties must evict the highest eligible id first');
+    assert.equal(db.prepare('SELECT SUM(bytes) AS n FROM task_history_storage_usage').get().n, retentionFixture.expected,
+      'both retained and rotated-out events count toward the exact eviction cost');
+  }, { readonly: true });
+
   fs.rmSync(pruneStateDir, { recursive: true, force: true });
 
   console.log('Task commit, inactivity recovery, cleanup retention, explicit completion, and residual-state tests passed.');

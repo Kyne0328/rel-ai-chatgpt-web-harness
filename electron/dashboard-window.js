@@ -36,7 +36,7 @@ import { dashboardTitleBarOverlay, dashboardWindowChrome, dashboardWindowChromeS
 
 function createDashboardWindowManager(deps) {
   const {
-    BrowserWindow, shell, app, dialog, screen, getConnection,
+    BrowserWindow, shell, app, dialog, screen, getConnection, getConnectionIdentity,
     nativeTheme,
     platform = process.platform,
     iconPath = '',
@@ -53,6 +53,10 @@ function createDashboardWindowManager(deps) {
   let windowCreationPromise = null;
   let dashboardOrigin = '';
   let dashboardAuthGeneration = '';
+  let readyDocument = null;
+  let documentRevision = 0;
+  let pendingOpen = null;
+  let reloadRequired = false;
   let persistTimer = null;
   let persistPromise = null;
   let persistRevision = 0;
@@ -66,6 +70,34 @@ function createDashboardWindowManager(deps) {
 
   async function open(routeHash = '', options = {}) {
     if (isQuitting()) throw new Error('Dashboard window is unavailable while Rel.AI is quitting.');
+    if (!routeHash && options.forceReload !== true) {
+      // A second activation must not expose a cold document or race a reauthentication.
+      if (pendingOpen) return pendingOpen;
+      const win = getWindow();
+      if (win && readyDocument?.win === win) {
+        const live = getConnectionIdentity?.();
+        if (live && readyDocument.authGeneration && String(live.authGeneration) === readyDocument.authGeneration
+          && live.origin === readyDocument.origin && safeOrigin(win.webContents.getURL()) === live.origin
+          && !win.webContents.isCrashed()) {
+          return reveal(win);
+        }
+      }
+    }
+    // Preserve explicit navigation order; a Settings click must not overtake a
+    // pending forced authentication. Ordinary tray gestures above join the tail.
+    const perform = () => openWithConnection(routeHash, options);
+    const pending = pendingOpen ? pendingOpen.then(perform) : perform();
+    pendingOpen = pending;
+    try { return await pending; }
+    finally { if (pendingOpen === pending) pendingOpen = null; }
+  }
+
+  async function openWithConnection(routeHash, options) {
+    if (isQuitting()) throw new Error('Dashboard window is unavailable while Rel.AI is quitting.');
+    if (options.forceReload === true) {
+      readyDocument = null;
+      reloadRequired = true;
+    }
     const connection = await getConnection();
     const target = validateConnection(connection);
     const authGeneration = String(connection?.authGeneration ?? '');
@@ -74,23 +106,42 @@ function createDashboardWindowManager(deps) {
     dashboardOrigin = target.origin;
     const win = await getOrCreateWindow();
     const current = safeUrl(win.webContents.getURL());
-    const forceReload = options.forceReload === true;
+    const forceReload = reloadRequired;
     if (forceReload && !requestedHash && current?.hash) target.hash = current.hash;
     const { sameDashboard, authRefreshRequired } = planDashboardNavigation(current, target, { requestedHash, currentAuthGeneration: dashboardAuthGeneration, nextAuthGeneration: authGeneration });
+    let checkedRevision = null;
     try {
       if (!sameDashboard || authRefreshRequired || forceReload) {
+        readyDocument = null;
         try { await win.loadURL(target.href); }
         catch (error) { if (!isAbortedNavigationError(error)) throw error; }
       } else if (requestedHash && current.hash !== requestedHash) {
         await navigateDashboardHash(win, requestedHash);
       }
-      if (!win.isVisible()) await win.webContents.executeJavaScript(DASHBOARD_READY_SCRIPT);
+      if (!win.isVisible()) {
+        checkedRevision = documentRevision;
+        await win.webContents.executeJavaScript(DASHBOARD_READY_SCRIPT);
+      }
     } catch (error) {
       // A failed initial boot must remain hidden and reload on the next retry.
-      if (!win.isDestroyed() && !win.isVisible()) win.destroy();
+      if ((checkedRevision === null || checkedRevision === documentRevision) && !win.isDestroyed() && !win.isVisible()) win.destroy();
       throw error;
     }
+    const live = getConnectionIdentity?.();
+    if ((getConnectionIdentity && (!live || live.origin !== target.origin || String(live.authGeneration) !== authGeneration))
+      || (checkedRevision !== null && checkedRevision !== documentRevision)
+      || safeOrigin(win.webContents.getURL()) !== target.origin) {
+      // No proof for the replacement document. Leave it intact and let startup recovery retry.
+      throw new Error('Dashboard connection or document changed before it was ready.');
+    }
+    if (checkedRevision !== null) readyDocument = { win, origin: target.origin, authGeneration };
     if (authGeneration) dashboardAuthGeneration = authGeneration;
+    reloadRequired = false;
+    return reveal(win);
+  }
+
+  function reveal(win) {
+    if (win.isMinimized()) win.restore();
     win.show();
     win.focus();
     return win;
@@ -158,7 +209,7 @@ function createDashboardWindowManager(deps) {
       }
       dashboardWindow.hide();
     });
-    dashboardWindow.on('closed', () => { dashboardWindow = null; });
+    dashboardWindow.on('closed', () => { readyDocument = null; dashboardWindow = null; });
     return dashboardWindow;
   }
 
@@ -168,6 +219,13 @@ function createDashboardWindowManager(deps) {
   }
 
   function configureNavigation(win) {
+    // A reload replaces the document; a hash change keeps the already-rendered shell.
+    win.webContents.on('did-start-navigation', details => {
+      if (details.isMainFrame && !details.isSameDocument) {
+        documentRevision++;
+        readyDocument = null;
+      }
+    });
     win.webContents.on('will-attach-webview', event => event.preventDefault());
     win.webContents.on('will-navigate', (event, target) => {
       if (safeOrigin(target) === dashboardOrigin) return;

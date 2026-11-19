@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -87,6 +88,33 @@ try {
     error => error.code === 'WORKSPACE_EDIT_RECOVERY_PENDING',
     'parent roots must not bypass their nested recovery record');
   recoverStructuredPatchTransaction(config, nested);
+
+  if (process.platform === 'win32') {
+    const alias = { alias: 'new-label', path: path.join(root, 'WORKSPACE') };
+    const marker = beginStructuredPatchTransaction(config, workspace,
+      [{ path: 'existing.txt', exists: true, content: Buffer.from('old\n'), mode }],
+      [{ path: 'existing.txt', exists: true, text: 'interrupted\n' }]);
+    fs.writeFileSync(existing, 'interrupted\n');
+    if (fs.existsSync(alias.path) && fs.realpathSync.native(alias.path) === fs.realpathSync.native(workspace.path)) {
+      assert.equal(inspectStructuredPatchTransaction(config, alias).pending, true, 'same Windows directory must find its original journal');
+      const duplicate = path.join(path.dirname(marker), createHash('sha256').update(path.resolve(alias.path)).digest('hex') + '.json');
+      const record = JSON.parse(fs.readFileSync(marker, 'utf8'));
+      fs.writeFileSync(duplicate, JSON.stringify({ ...record, workspaceRoot: alias.path }), { flag: 'wx' });
+      assert.throws(() => recoverStructuredPatchTransaction(config, alias), error => error.code === 'WORKSPACE_EDIT_RECOVERY_PENDING');
+      assert.equal(fs.readFileSync(existing, 'utf8'), 'interrupted\n');
+      fs.unlinkSync(duplicate);
+      assert.equal(recoverStructuredPatchTransaction(config, alias).recovered, true);
+      assert.equal(fs.existsSync(marker), false);
+      assert.equal(recoverStructuredPatchTransaction(config, alias).recovered, false);
+    } else {
+      // Windows also permits case-sensitive folders. A different directory has no authority.
+      fs.mkdirSync(alias.path, { recursive: true });
+      assert.throws(() => recoverStructuredPatchTransaction(config, alias), error => error.code === 'WORKSPACE_EDIT_RECOVERY_PENDING');
+      assert.equal(fs.readFileSync(existing, 'utf8'), 'interrupted\n');
+      assert.equal(recoverStructuredPatchTransaction(config, workspace).recovered, true);
+    }
+    assert.equal(fs.readFileSync(existing, 'utf8'), 'old\n');
+  }
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }

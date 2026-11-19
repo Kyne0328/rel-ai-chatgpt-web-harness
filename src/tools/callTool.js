@@ -308,7 +308,7 @@ async function callToolObserved(name, args = {}, context = {}) {
         ? knownTask?.principalFingerprint
         : principalFingerprint(effectivePrincipal)
     });
-    if (taskProgressPatch) applyTaskProgressPatch(requestedTaskId, taskProgressPatch, finishActivity?.update);
+    if (taskProgressPatch) await applyTaskProgressPatch(config, requestedTaskId, taskProgressPatch, finishActivity?.update, context);
     const execution = await executeToolCall({
       config, name, executionName: operationName, effectiveArgs,
       context: operationName === OP.COMPOSE ? { ...context,
@@ -388,7 +388,8 @@ async function callToolObserved(name, args = {}, context = {}) {
       ...extraAudit,
       ...(valueOk ? {} : { error: activityResult.error })
     }, { strictIntegrity: Boolean(workId) && (!optionalIntegrity || operationName === OP.WORK_BEGIN),
-      strictHistory: operationName === OP.WORK_BEGIN, optionalIntegrity });
+      strictHistory: operationName === OP.WORK_BEGIN, optionalIntegrity,
+      authoritativeValidationScope: validationResultScope(operationName, value) });
     const auditEntry = workId ? await auditPromise : null;
     refreshRequestTaskIntegrity(requestTaskContext, auditEntry);
     if (workId && evidenceDraft && auditEntry) {
@@ -525,7 +526,8 @@ async function callToolObserved(name, args = {}, context = {}) {
         ms: Date.now() - started,
         error: enhanced.message,
         errorCode: enhanced.code || undefined
-      });
+      }, { authoritativeValidationScope: verifiedWorkspaceFailure && resultFactsEligible
+        ? validationResultScope(operationName, failedValue) : undefined });
       if (failedWorkId && failedDraft && failedAuditEntry) {
         await persistWorkflowEvidence(config, effectiveArgs, operationName, resolvedAction, failedValue, failedAuditEntry, failedWorkId, failedDraft, { persist: true });
       }
@@ -675,6 +677,11 @@ async function persistWorkflowEvidence(config, args, operationName, action, valu
     if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] workflow evidence:', error);
     return null;
   }
+}
+
+function validationResultScope(operationName, result) {
+  return operationName === OP.VALIDATE_CHECKS ? result?.validationScope
+    : operationName === OP.EDIT ? result?.checks?.validationScope : undefined;
 }
 
 function refreshRequestTaskIntegrity(requestState, auditEntry) {

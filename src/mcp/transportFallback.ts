@@ -314,11 +314,7 @@ async function runFallbackToolExecution(config: any, message: any, args: any, op
   }
 
   if (started.reused && started.record.status !== 'running') {
-    acknowledgeFallbackCompletionNotice(config, started.record.operationId, {
-      noticeScope: principalFingerprint(options.principal),
-      workspace: String(args.workspace || '')
-    });
-    return replayFallbackResult(message.id, workId, started.record, deliveryCallback(config, started.record, options));
+    return replayFallbackResult(config, message.id, workId, started.record, options, args.workspace);
   }
 
   let deliveryInterrupted = false;
@@ -349,11 +345,7 @@ async function runFallbackToolExecution(config: any, message: any, args: any, op
   enableFallbackCompletionNotice(config, started.record);
   const operation = fallbackExecutionStatus(started.record.operationId, { config }) || {};
   if (operation.status && operation.status !== 'running') {
-    acknowledgeFallbackCompletionNotice(config, started.record.operationId, {
-      noticeScope: principalFingerprint(options.principal),
-      workspace: String(args.workspace || '')
-    });
-    return replayFallbackResult(message.id, workId, started.record, deliveryCallback(config, started.record, options));
+    return replayFallbackResult(config, message.id, workId, started.record, options, args.workspace);
   }
   return successResponse(message.id, toolResult({
     ok: true,
@@ -416,7 +408,17 @@ function deliveryCallback(config: any, record: any, options: any) {
   return () => { acknowledgeFallbackDelivery(config, delivery.operationId, delivery); };
 }
 
-function replayFallbackResult(requestId: any, workId: any, record: any, onDelivered: any = undefined) {
+function replayFallbackResult(config: any, requestId: any, workId: any, record: any, options: any, workspace: any) {
+  const acknowledgeNotice = () => acknowledgeFallbackCompletionNotice(config, record.operationId, {
+    noticeScope: principalFingerprint(options.principal), workspace: String(workspace || '')
+  });
+  const resultDelivered = deliveryCallback(config, record, options);
+  // HTTP finish and successful stdio send are already wired to this callback.
+  // A replay constructed for a disconnected client has not delivered its notice.
+  const onDelivered = resultDelivered || options.transportType === 'stdio'
+    ? () => { resultDelivered?.(); acknowledgeNotice(); }
+    : undefined;
+  if (!onDelivered) acknowledgeNotice();
   if (record.result) return successResponse(requestId, record.result, onDelivered);
   if (record.persistedResult && typeof record.persistedResult === 'object') {
     return successResponse(requestId, toolResult({ ...record.persistedResult, ...(workId ? { work_id: workId } : {}) }, record.isError === true), onDelivered);

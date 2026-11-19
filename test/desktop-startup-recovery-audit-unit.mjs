@@ -212,12 +212,21 @@ const bootstrapConnection = runInNewContext(`${bootstrapSource}\nbuildDashboardC
     return { port: 3333, bootstrap: 'new-token' };
   } },
   dashboardWindowManager: { getState: () => ({ customTitleBar: false, platform: 'win32' }) },
-  lifecycleToken: 5
+  lifecycleToken: 5, stopPromise: null
 });
 const bootstrapped = await bootstrapConnection();
 assert.equal(bootstrapCalls, 2, 'a late bootstrap acknowledgment must be retried without restarting the service');
 assert.ok(bootstrapped.url.includes('bootstrap=new-token'));
 assert.equal(bootstrapped.authGeneration, 5);
+const changingService = {
+  isListening: () => true, stopPromise: null, lifecycleToken: 5,
+  serviceProcessClient: { async dashboardBootstrap() {
+    changingService.lifecycleToken++;
+    return { port: 3333, bootstrap: 'old-session' };
+  } }
+};
+await assert.rejects(runInNewContext(`${bootstrapSource}\nbuildDashboardConnection()`, changingService),
+  /service changed/i, 'a response issued across a generation change must not be presented as live');
 
 
 // Reopening a stopped service must recover regardless of the retained window.
@@ -244,6 +253,19 @@ for (const surface of ['dashboard', 'splash']) {
   assert.equal(staleWindowShowCalls, 0, `reopening a stopped ${surface} must not only reveal the stale window`);
 }
 
+// Native activation of a resident window must use the same gated manager open as the menu.
+{
+  const calls = [];
+  const focus = runInNewContext(`${focusSource}\nfocusActiveWindow`, {
+    dashboardWindowManager: { getWindow: () => ({}) },
+    serviceRuntime: { isListening: () => true },
+    openRunningDashboard: async () => { calls.push('dashboard'); },
+    taskbarCompletionBadge: { clear() { calls.push('badge'); } }
+  });
+  focus();
+  assert.equal(calls[0], 'dashboard', 'tray focus must dispatch the managed reveal before shell housekeeping');
+}
+
 // Desktop configuration gates must recognize the persisted local-only mode.
 const configuredSource = desktopHostSource.slice(
   desktopHostSource.indexOf('  function hasConfiguredDesktop() {'),
@@ -253,6 +275,22 @@ const openSource = desktopHostSource.slice(
   desktopHostSource.indexOf("  async function openDashboardWindow(routeHash = '', windowOptions = {}) {"),
   desktopHostSource.indexOf('  function openDashboardSettings() {')
 );
+// Both tray gestures report and schedule recovery when a retained window needs
+// reauthentication and its bootstrap fails. Resident double-click need not read config.
+for (const action of ['focusActiveWindow', 'openDashboardWindow']) {
+  const recovered = [];
+  const open = runInNewContext(focusSource + openSource + '\n' + action, {
+    hasConfiguredDesktop: () => { assert.equal(action, 'openDashboardWindow'); return true; },
+    dashboardWindowManager: { getWindow: () => ({}) }, serviceRuntime: { isListening: () => true },
+    showDashboardWindow: async () => { throw new Error('bootstrap failed'); },
+    desktopStatusFailure: code => code, ERROR_CODES: { DASHBOARD_UNAVAILABLE: 'dashboard-unavailable' },
+    formatError: e => e.message, setStatus: status => recovered.push(status),
+    showStartupProblem: () => recovered.push('problem'), scheduleStartupRetry: () => recovered.push('retry')
+  });
+  if (action === 'openDashboardWindow') await assert.rejects(open(), /bootstrap failed/);
+  else { open(); await new Promise(setImmediate); }
+  assert.deepEqual(recovered, ['dashboard-unavailable', 'problem', 'retry']);
+}
 const localOnlyState = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-local-only-routing-'));
 const previousLocalOnlyState = process.env.REL_AI_MCP_STATE_DIR;
 process.env.REL_AI_MCP_STATE_DIR = localOnlyState;

@@ -248,6 +248,56 @@ function createHarness({
 }
 
 
+
+for (const mode of ['saved', 'failed', 'stalled']) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-close-registry-'));
+  const previous = 'https://previous.fixture.invalid', next = 'https://new.fixture.invalid';
+  let release, started, failWrite = mode === 'failed', closed = false;
+  const gate = new Promise(resolve => { release = resolve; });
+  const admitted = new Promise(resolve => { started = resolve; });
+  const harness = () => createHarness({ listPersistentProfiles: () => [directory],
+    readPersistentSites: browserProfiles.readPersistentBrowserSites,
+    recordPersistentSite: async (profile, origin) => {
+      started(); await gate;
+      if (failWrite) throw new Error('Synthetic registration failed.');
+      return browserProfiles.recordPersistentBrowserSite(profile, origin);
+    } });
+  const { host, webContents } = harness();
+  try {
+    await browserProfiles.recordPersistentBrowserSite(directory, previous);
+    const session = await host.run({ action: 'start', profileDirectory: directory });
+    await host.run({ action: 'open_page', nativeSessionId: session.nativeSessionId });
+    await webContents[0].loadURL(next + '/route');
+    await admitted;
+    if (mode === 'stalled') mock.timers.enable({ apis: ['setTimeout'] });
+    const closing = host.closeAll().then(() => { closed = true; return null; }, error => error);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(closed, false, 'orderly close must wait for a recently visited origin to be recorded');
+    if (mode === 'stalled') {
+      mock.timers.tick(6000);
+      assert.match((await closing).errors[0].message, /timed out saving browser site metadata/i);
+      mock.timers.reset();
+      assert.deepEqual(await browserProfiles.readPersistentBrowserSites(directory), [previous]);
+    }
+    release();
+    if (mode === 'failed') {
+      assert.equal((await closing).errors[0].code, 'BROWSER_PROFILE_WRITE_FAILED');
+      assert.deepEqual(await browserProfiles.readPersistentBrowserSites(directory), [previous]);
+      failWrite = false;
+    }
+    if (mode === 'saved') assert.equal(await closing, null);
+    else await host.closeAll();
+    const reopened = harness().host;
+    assert.deepEqual((await reopened.listSavedSites()).sites.map(site => site.origin).sort(), [next, previous].sort());
+    await reopened.closeAll();
+  } finally {
+    release(); failWrite = false;
+    if (mode === 'stalled') mock.timers.reset();
+    await host.closeAll();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 for (const scenario of ['recover', 'reload-failure', 'repeat-crash', 'close-during-recovery']) {
   const waiting = new Map();
   const waitForEvent = type => new Promise(resolve => { waiting.set(type, resolve); });
@@ -378,6 +428,42 @@ for (const scenario of ['recover', 'reload-failure', 'repeat-crash', 'close-duri
   connections[1].enabled = false;
   await assert.rejects(() => host.goalProtocolRequest({ tunnelId: connections[1].tunnelId, path: '/backend-api/conversations' }), /configured tunnel/);
   assert.equal((await host.getGoalLoginStatus()).connections[1].state, 'disabled');
+  await host.closeAll();
+}
+
+{
+  const directory = path.join(os.tmpdir(), 'relai-goal-auth-cancellation-fixture');
+  const { host, pathSessions } = createHarness({ goalLoginProfileDirectory: directory });
+  const session = new FakeSession();
+  session.authenticated = true;
+  pathSessions.set(directory, session);
+  const payload = { path: '/backend-api/conversations' };
+  const cancelled = error => error.code === 'BROWSER_OPERATION_CANCELLED';
+  await assert.rejects(host.goalProtocolRequest(payload, { signal: AbortSignal.abort() }), cancelled);
+  assert.equal(session.requests.length, 0, 'an already cancelled read does not request authentication');
+
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  let lookups = 0;
+  const fetch = session.fetch;
+  session.fetch = async (url, options) => {
+    if (url.endsWith('/api/auth/session')) { lookups++; await gate; }
+    return fetch(url, options);
+  };
+  const controller = new AbortController();
+  let detached = false;
+  const first = assert.rejects(host.goalProtocolRequest(payload, { signal: controller.signal }), cancelled)
+    .then(() => { detached = true; });
+  const second = host.goalProtocolRequest(payload);
+  controller.abort();
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(detached, true, 'cancelled reader settles while its sibling is still authenticating');
+    assert.equal(lookups, 1);
+  } finally { release(); }
+  await first;
+  assert.equal((await second).ok, true, 'cancelling one reader must not abort the shared lookup');
+  assert.equal(session.requests.filter(request => request.url.includes('/backend-api/')).length, 1);
   await host.closeAll();
 }
 
@@ -1027,7 +1113,7 @@ for (const scenario of ['recover', 'reload-failure', 'repeat-crash', 'close-duri
   const recorded = [];
   const { host, pathSessions, webContents } = createHarness({
     listPersistentProfiles: async () => [profileDirectory],
-    readPersistentSites: async () => ['https://example.test', 'https://storage.test'],
+    readPersistentSites: async () => ['https://example.test', 'https://storage.test', ...recorded.map(([, origin]) => origin)],
     recordPersistentSite: async (directory, url) => recorded.push([directory, url]),
     forgetPersistentSite: async (directory, origin) => forgotten.push([directory, origin])
   });
@@ -1050,7 +1136,8 @@ for (const scenario of ['recover', 'reload-failure', 'repeat-crash', 'close-duri
   const page = await host.run({ action: 'open_page', nativeSessionId: persistent.nativeSessionId });
   await webContents.at(-1).loadURL('https://remembered.test/login');
   await new Promise(resolve => setImmediate(resolve));
-  assert.ok(recorded.some(([, url]) => url === 'https://remembered.test/login'), 'persistent navigation must register the site for later per-site management');
+  assert.deepEqual(recorded, [[path.resolve(profileDirectory), 'https://remembered.test']], 'persistent navigation must register only the canonical origin for its profile');
+  assert.ok((await host.listSavedSites()).sites.some(site => site.origin === 'https://remembered.test'), 'the visited origin must be visible to per-site management');
   await assert.rejects(() => host.clearSavedSite('https://storage.test'), /Stop persistent browser sessions/i);
   await host.run({ action: 'close_session', nativeSessionId: persistent.nativeSessionId });
   assert.ok(page.nativePageId);
@@ -1437,10 +1524,14 @@ for (const scenario of ['recover', 'reload-failure', 'repeat-crash', 'close-duri
     assert.ok(recordedSites.includes('https://two.fixture.invalid'), 'concurrent native origins must both survive canonical serialization');
     const cachedSession = [...pathSessions.values()][0];
     cachedSession.cookieValues = [{ name: 'fixture', value: 'synthetic', domain: 'fixture.invalid' }];
-    holdWrite = true;
     await webContents[0].loadURL('https://pending.fixture.invalid/');
+    assert.equal((await runtime.stop(workspace, { sessionId: first.sessionId }, context)).ok, true);
+    assert.ok((await browserProfiles.readPersistentBrowserSites([...pathSessions.keys()][0])).includes('https://pending.fixture.invalid'), 'ordinary stop must commit host-owned navigation before reporting success');
+    // Exercise clear's own barrier with a profile-store write not owned by the closed host session.
+    holdWrite = true;
+    const queuedWrite = browserProfiles.recordPersistentBrowserSite([...pathSessions.keys()][0], 'https://queued.fixture.invalid/');
+    pendingSiteWrites.push(queuedWrite);
     await writeStarted;
-    await runtime.stop(workspace, { sessionId: first.sessionId }, context);
     assert.equal(cachedSession.storageCleared, 0, 'ordinary persistent close must retain saved site data');
     let clearStarted = false;
     let beginClear = () => {};
@@ -1454,6 +1545,7 @@ for (const scenario of ['recover', 'reload-failure', 'repeat-crash', 'close-duri
     await assert.rejects(() => runtime.start(workspace, {}, context), error => error?.code === 'BROWSER_PROFILE_ALREADY_ACTIVE', 'profile clear must reserve ownership against concurrent start');
     holdWrite = false;
     releaseWrite();
+    await queuedWrite;
     await clearStartedPromise;
     assert.equal(clearStarted, true, 'clear_profile must cross the native bridge and clear the cached Electron Session');
     releaseClear();

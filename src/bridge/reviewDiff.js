@@ -11,8 +11,10 @@ function buildUntrackedDiff(workspace, paths, maxBytes = 1024 * 1024) {
   const budget = Math.max(0, Math.min(5 * 1024 * 1024, Math.floor(Number(maxBytes) || 0)));
   const sections = [];
   let remaining = budget;
+  let truncated = false;
+  let readOmitted = false;
   for (const relativePath of paths) {
-    if (remaining < 256) { sections.push('\n[rel-ai-mcp untracked diff truncated: output budget exhausted]\n'); break; }
+    if (remaining < 256) { truncated = true; sections.push('\n[rel-ai-mcp untracked diff truncated: output budget exhausted]\n'); break; }
     let descriptor;
     try {
       const safe = resolveSafePath(workspace.path, relativePath, { operation: 'review' });
@@ -39,19 +41,26 @@ function buildUntrackedDiff(workspace, paths, maxBytes = 1024 * 1024) {
         section = header + ['--- /dev/null', `+++ b/${safe.relativePath}`,
           `@@ -0,0 +1,${lines.length} @@`, ...lines.map(line => '+' + line), ''].join('\n');
       }
-      if (count < stat.size) section += '[rel-ai-mcp untracked diff truncated: bounded file prefix only]\n';
+      if (count < stat.size) {
+        truncated = true;
+        section += '[rel-ai-mcp untracked diff truncated: bounded file prefix only]\n';
+      }
       const bounded = truncateDiff(section, remaining);
+      if (bounded !== section) truncated = true;
       sections.push(bounded);
       remaining -= Buffer.byteLength(bounded);
-    } catch (error) {
-      const message = truncateDiff(`\n[rel-ai-mcp could not read untracked file ${relativePath}: ${error instanceof Error ? error.message : String(error)}]\n`, remaining);
+    } catch {
+      readOmitted = true;
+      const detail = '\n[rel-ai-mcp: untracked file content unavailable]\n';
+      const message = truncateDiff(detail, remaining);
+      if (message !== detail) truncated = true;
       sections.push(message);
       remaining -= Buffer.byteLength(message);
     } finally {
       if (descriptor !== undefined) fs.closeSync(descriptor);
     }
   }
-  return sections.join('');
+  return { text: sections.join(''), truncated, readOmitted };
 }
 
 function normalizePaths(values) {

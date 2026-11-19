@@ -148,6 +148,63 @@ try {
   const stillUnconfirmed = await api.reconcileUnconfirmedResult(unconfirmed, () => false, { attempts: 2, intervalMs: 0 });
   assert.equal(stillUnconfirmed.outcomeUnknown, true, 'an unverified outcome must never be declared successful');
   assert.equal((await api.reconcileUnconfirmedResult({ ok: true }, () => { throw Error('should not run'); })).ok, true);
+  // Dispatch was observed by our fixture, but only a usable acknowledgement
+  // distinguishes a committed mutation from a lost/gateway response.
+  for (const [status, body] of [
+    [200, '{"ok":'], [200, '{}'], [502, 'Bad Gateway'], [503, '{"ok":true}']
+  ]) {
+    let posts = 0;
+    const refreshBefore = refreshCalls;
+    globalThis.fetch = async () => { posts++; return new Response(body, { status }); };
+    const result = await api.postJson('/fixture/mutation', {}, { timeout: 0 });
+    assert.equal(result.outcomeUnknown, true);
+    assert.equal(result.httpStatus, status);
+    assert.equal(refreshCalls, refreshBefore + 1);
+    const verified = await api.reconcileUnconfirmedResult(result, () => posts === 1, { attempts: 1 });
+    assert.equal(verified.reconciled, true);
+    assert.equal(posts, 1, 'state verification must never replay the mutation');
+  }
+  {
+    let reloads = 0;
+    globalThis.window.relaiDesktop = { reloadDashboard: async () => { reloads++; } };
+    const before = refreshCalls;
+    for (const [status, body] of [
+      [200, '{"ok":false,"error":"cannot remove"}'], [409, '{"ok":false,"error":"version conflict"}'],
+      [500, '{"ok":false,"error":"rejected"}'], [401, 'Unauthorized']
+    ]) {
+      globalThis.fetch = async () => new Response(body, { status });
+      const result = await api.postJson('/fixture/rejected', {}, { timeout: 0 });
+      assert.equal(result.ok, false);
+      assert.equal(result.outcomeUnknown, undefined);
+      assert.equal(result.httpStatus, status);
+    }
+    assert.equal(reloads, 1, 'a non-JSON auth rejection must still request dashboard recovery');
+    assert.equal(refreshCalls, before, 'definite rejections do not start uncertain-outcome reconciliation');
+  }
+
+  {
+    const pending = [];
+    globalThis.fetch = url => new Promise(resolve => pending.push({ url, resolve }));
+    const request = url => api.fetchJson(url, { timeout: 0 });
+    const finish = (index, version) => pending[index].resolve(Response.json({ ok: true, version }));
+    const early = request('/fixture/tasks'), late = request('/fixture/tasks');
+    finish(1, 2);
+    assert.equal((await late).version, 2);
+    finish(0, 1);
+    assert.equal((await early).version, 1, 'original caller still receives its own response');
+    assert.equal((await request('/fixture/tasks')).version, 2, 'a remount cannot reuse the older response');
+    assert.equal(pending.length, 2);
+
+    const invalidated = request('/fixture/project');
+    api.invalidateCache('/fixture/project');
+    finish(2, 1);
+    await invalidated;
+    const rebuilt = request('/fixture/project');
+    assert.equal(pending.length, 4, 'a read started before invalidation must not repopulate that entry');
+    finish(3, 3);
+    assert.equal((await rebuilt).version, 3);
+  }
+
 } finally {
   if (originalDocument === undefined) delete globalThis.document; else globalThis.document = originalDocument;
   if (originalEventSource === undefined) delete globalThis.EventSource; else globalThis.EventSource = originalEventSource;

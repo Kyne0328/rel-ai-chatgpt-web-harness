@@ -32,6 +32,7 @@ export function ProjectFormModal({ configuredWorkspaces = [], mode = 'add', onCl
   const isDesktop = document.documentElement.dataset.surface === 'desktop';
   const [alias, setAlias] = useState(initialAlias);
   const [pathsText, setPathsText] = useState(initialPathsText);
+  const sourceDraftRef = useRef(initialPathsText);
   const [manualMode, setManualMode] = useState(!isDesktop);
   const [busy, setBusy] = useState(false);
   const [pickerBusy, setPickerBusy] = useState('');
@@ -127,8 +128,19 @@ export function ProjectFormModal({ configuredWorkspaces = [], mode = 'add', onCl
     setPendingNavigation('');
   };
 
-  const updatePathsText = value => { if (!savePendingRef.current) setPathsText(value); };
+  // A picker or drop can settle after another edit, or before React's next render.
+  const updatePathsText = value => {
+    if (savePendingRef.current) return;
+    sourceDraftRef.current = value;
+    setPathsText(value);
+  };
   const setSourcePaths = values => updatePathsText(normalizeSourcePaths(values).join('\n'));
+  const addDroppedPaths = dropped => {
+    const current = parseSourcePaths(sourceDraftRef.current);
+    const next = normalizeSourcePaths([...current, ...dropped]);
+    setSourcePaths(next);
+    if (next.length - current.length < dropped.length) toast('Duplicate source folders were skipped.', { variant: 'info' });
+  };
   const browse = async replaceIndex => {
     if (savePendingRef.current || pickerBusy) return;
     const generation = folderRequestRef.current;
@@ -150,13 +162,17 @@ export function ProjectFormModal({ configuredWorkspaces = [], mode = 'add', onCl
     }
     const candidate = String(result.path).trim();
     const candidateKey = normalizeWorkspacePath(candidate);
-    const duplicate = paths.some((value, index) => index !== replaceIndex && normalizeWorkspacePath(value) === candidateKey);
+    const current = parseSourcePaths(sourceDraftRef.current);
+    const replacing = Number.isInteger(replaceIndex);
+    const targetIndex = replacing ? current.findIndex(value => normalizeWorkspacePath(value) === normalizeWorkspacePath(paths[replaceIndex])) : -1;
+    if (replacing && targetIndex < 0) return;
+    const duplicate = current.some((value, index) => index !== targetIndex && normalizeWorkspacePath(value) === candidateKey);
     if (duplicate) {
       toast('That source folder is already attached to this project.', { variant: 'info' });
       return;
     }
-    const next = [...paths];
-    if (Number.isInteger(replaceIndex) && replaceIndex >= 0 && replaceIndex < next.length) next[replaceIndex] = candidate;
+    const next = [...current];
+    if (replacing) next[targetIndex] = candidate;
     else next.push(candidate);
     setSourcePaths(next);
   };
@@ -186,8 +202,7 @@ export function ProjectFormModal({ configuredWorkspaces = [], mode = 'add', onCl
     const result = await reconcileUnconfirmedResult(mutation, async () => {
       const state = await fetchJson(DASHBOARD_DATA_URL, { cache: 'no-store', pauseTimeoutWhenHidden: false });
       const saved = state?.ok && state.config?.workspaces?.find(item => item.alias === cleanAlias);
-      return Boolean(saved && sourcePathsFromWorkspace(saved).length === paths.length
-        && paths.every(path => sourcePathsFromWorkspace(saved).includes(path)));
+      return matchesRequestedSources(saved, paths);
     });
     setSaving(false);
     if (!result?.ok) {
@@ -234,7 +249,7 @@ export function ProjectFormModal({ configuredWorkspaces = [], mode = 'add', onCl
       aliasError ? h('div', { className: 'ws-form-conflict', id: 'workspaceAliasError', role: 'alert' }, aliasError) : null,
       conflict || serverError ? h('div', { className: 'ws-form-conflict', id: 'workspaceConflictError', role: 'alert', tabIndex: -1 }, conflict || serverError) : null
     ),
-    h(SourceFolders, { paths, pathsText, setPathsText: updatePathsText, setSourcePaths, manualMode, pickerBusy, browse, sourceError, pathStatus, pathsRef, emptySourceRef, busy, savePendingRef, folderRequestRef }),
+    h(SourceFolders, { paths, pathsText, setPathsText: updatePathsText, setSourcePaths, addDroppedPaths, manualMode, pickerBusy, browse, sourceError, pathStatus, pathsRef, emptySourceRef, busy, savePendingRef, folderRequestRef }),
     isEdit ? h(ProjectDetails, { workspace, alias: originalAlias, onNavigate: requestNavigate }) : null,
     h('footer', { className: 'modal-footer' },
       isEdit ? h('div', { className: 'modal-danger-zone' },
@@ -346,7 +361,8 @@ function RepairProjectModalContent({ configuredWorkspaces = [], onClose, opener 
     const result = await reconcileUnconfirmedResult(mutation, async () => {
       const latest = await fetchJson(DASHBOARD_DATA_URL, { cache: 'no-store', pauseTimeoutWhenHidden: false });
       const saved = latest?.ok && latest.config?.workspaces?.find(item => item.alias === workspace.alias);
-      return Boolean(saved && sourcePathsFromWorkspace(saved).includes(clean));
+      const expected = normalizeSourcePaths([clean, ...sourcePathsFromWorkspace(workspace).slice(1)]);
+      return matchesRequestedSources(saved, expected);
     });
     setSaving(false);
     if (!result?.ok) {
@@ -419,21 +435,36 @@ export function DeleteProjectModal({ alias = '', onClose, opener = null }) {
   );
 }
 
-function SourceFolders({ browse, emptySourceRef, manualMode, pathStatus, paths, pathsRef, pathsText, pickerBusy, setPathsText, setSourcePaths, sourceError, busy, savePendingRef, folderRequestRef }) {
+function matchesRequestedSources(workspace, expected) {
+  if (!workspace || !expected.length || normalizeWorkspacePath(workspace.path) !== normalizeWorkspacePath(expected[0])) return false;
+  const actual = sourcePathsFromWorkspace(workspace);
+  return actual.length === expected.length && expected.every((path, index) => normalizeWorkspacePath(path) === normalizeWorkspacePath(actual[index]));
+}
+
+function SourceFolders({ addDroppedPaths, browse, emptySourceRef, manualMode, pathStatus, paths, pathsRef, pathsText, pickerBusy, setPathsText, setSourcePaths, sourceError, busy, savePendingRef, folderRequestRef }) {
   const [dropActive, setDropActive] = useState(false);
   const canDropFolders = typeof window.relaiDesktop?.getPathForFile === 'function';
+  const pendingDrops = useRef({ generation: -1, batches: [] });
   const onDrop = async event => {
     if (!canDropFolders) return;
     event.preventDefault();
     setDropActive(false);
     if (savePendingRef.current) return;
     const generation = folderRequestRef.current;
-    const dropped = await resolveDroppedFolders(event.dataTransfer);
-    if (savePendingRef.current || generation !== folderRequestRef.current || !dropped.length) return;
-    const next = normalizeSourcePaths([...paths, ...dropped]);
-    const added = next.length - paths.length;
-    setSourcePaths(next);
-    if (added < dropped.length) toast('Duplicate source folders were skipped.', { variant: 'info' });
+    // Validate in parallel, but never make a later drop the primary folder just
+    // because its preflight finished first. Retired drafts cannot block new drops.
+    if (pendingDrops.current.generation !== generation) pendingDrops.current = { generation, batches: [] };
+    const { batches } = pendingDrops.current;
+    const batch = { paths: null };
+    batches.push(batch);
+    batch.paths = await resolveDroppedFolders(event.dataTransfer).catch(() => []);
+    if (savePendingRef.current || generation !== folderRequestRef.current) {
+      batches.length = 0;
+      return;
+    }
+    const firstPending = batches.findIndex(item => item.paths === null);
+    const ready = batches.splice(0, firstPending < 0 ? batches.length : firstPending).flatMap(item => item.paths);
+    if (ready.length) addDroppedPaths(ready);
   };
   return h('section', { className: 'ws-source-section', 'aria-labelledby': 'wsSourceFolderHeading' },
     h('h3', { className: 'ws-source-heading', id: 'wsSourceFolderHeading' }, 'Source folders'),

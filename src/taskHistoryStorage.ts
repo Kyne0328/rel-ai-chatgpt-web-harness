@@ -271,11 +271,12 @@ function listRecentSessionEventPage(directory: string, options: EventPageOptions
       filters.push(`EXISTS (SELECT 1 FROM task_history_summaries AS scope WHERE ${scope.join(' AND ')})`);
     }
     const cursor = options.cursor;
-    const eventTimestamp = String(cursor?.eventTimestamp || '').trim();
+    const eventTimestamp = cursor?.eventTimestamp;
     const taskUpdatedAtMs = Math.max(0, Math.floor(Number(cursor?.taskUpdatedAtMs || 0)));
     const taskId = String(cursor?.taskId || '').trim();
     const eventIndex = Math.floor(Number(cursor?.eventIndex ?? -1));
-    if (eventTimestamp && taskUpdatedAtMs && taskId && eventIndex >= 0) {
+    // Untimed imported events have the empty SQLite sort key, not a missing cursor.
+    if (typeof eventTimestamp === 'string' && taskUpdatedAtMs && taskId && eventIndex >= 0) {
       filters.push(`(
         event_timestamp < ?
         OR (event_timestamp = ? AND task_updated_at_ms < ?)
@@ -487,25 +488,26 @@ function pruneSessions(directory: string, options: TaskHistoryRetentionOptions =
 
     let retainedBytes = taskHistoryStorageBytes(db);
     if (retainedBytes > storageBudgetBytes) {
-      const candidates = db.prepare(`
-        SELECT history.id,history.payload,
-          length(CAST(history.payload AS BLOB)) + COALESCE(SUM(length(CAST(events.payload AS BLOB))), 0) AS bytes
-        FROM task_history AS history
-        LEFT JOIN task_history_events AS events ON events.task_id=history.id
-        WHERE CASE
-          WHEN json_valid(history.payload) THEN lower(COALESCE(json_extract(history.payload, '$.status'), '')) IN ('completed','failed','cancelled')
-          ELSE 0
-        END
-        GROUP BY history.id,history.updated_at_ms
-        ORDER BY history.updated_at_ms ASC,history.id DESC
-      `).all() as unknown as Array<{ id: string; payload: string; bytes?: number }>;
-      for (const candidate of candidates) {
-        if (retainedBytes <= storageBudgetBytes) break;
-        const taskId = String(candidate.id || '');
-        if (!taskId || parseStoredSession(candidate.payload)?.id !== taskId) continue;
-        removeHistory.run(taskId);
-        prunedIds.push(taskId);
-        retainedBytes = Math.max(0, retainedBytes - Math.max(0, Number(candidate.bytes || 0)));
+      // Walk the summary index oldest-first. The event ledger can retain rows
+      // no longer in a task's snapshot; its triggers account for each deletion.
+      const select = `SELECT summary.id,summary.updated_at_ms,history.payload
+        FROM task_history_summaries AS summary JOIN task_history AS history ON history.id=summary.id
+        WHERE summary.status IN ('completed','failed','cancelled')`;
+      const oldest = 'ORDER BY summary.updated_at_ms ASC,summary.id DESC LIMIT 1';
+      const first = db.prepare(`${select} ${oldest}`);
+      const next = db.prepare(`${select} AND summary.updated_at_ms >= ?
+        AND (summary.updated_at_ms > ? OR summary.id < ?) ${oldest}`);
+      type Candidate = { id: string; updated_at_ms: number; payload: string };
+      let candidate = first.get() as Candidate | undefined;
+      while (candidate) {
+        if (candidate.id && parseStoredSession(candidate.payload)?.id === candidate.id) {
+          removeHistory.run(candidate.id);
+          prunedIds.push(candidate.id);
+          retainedBytes = taskHistoryStorageBytes(db);
+          if (retainedBytes <= storageBudgetBytes) break;
+        }
+        // Advance even if a future-version or malformed record must be retained.
+        candidate = next.get(candidate.updated_at_ms, candidate.updated_at_ms, candidate.id) as Candidate | undefined;
       }
     }
     retireObsoleteTaskIntegrity(db, [...new Set(prunedIds)]);

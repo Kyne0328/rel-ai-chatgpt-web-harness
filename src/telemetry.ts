@@ -351,8 +351,11 @@ function replayQueuedDiagnostics(config: TelemetryConfig): number {
           'relai.error.category': record.category
         }) as OpenTelemetryApi.Attributes
       }, sampledParent);
+      // A recording SDK span stops reporting isRecording() at end(); keep its
+      // reservation until the exporter acknowledges (or rejects) this batch.
+      const recording = span.isRecording();
       span.end();
-      if (span.isRecording()) started += 1;
+      if (recording) started += 1;
       else diagnosticReplayInFlight.delete(record.id);
     }
   } catch { diagnosticFailureStorageDrops += 1; }

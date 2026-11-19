@@ -77,6 +77,31 @@ try {
   assertAccounting();
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM task_history_summaries').get().n, 0);
 
+
+  // A failing synchronous save must not consume an earlier, already-staged
+  // event. An explicit retry may save the new event; the failed call must not.
+  for (const recovery of ['flush', 'retry']) {
+    const id = 'sync-write-recovery-' + recovery;
+    const record = (eventId, defer = false) => recordTaskActivityEvent({ stateDir }, {
+      task: { id, workspace: 'app', status: 'planning' },
+      activityEvent: { eventId, timestamp: '2026-10-01T00:00:00Z', summary: eventId }
+    }, { defer });
+    const ids = () => readSession(snapshotHistoryDirectory, id).events.map(event => event.eventId);
+    record('base');
+    record('accepted', true);
+    db.exec("CREATE TRIGGER fail_sync_save BEFORE UPDATE ON task_history BEGIN SELECT RAISE(ABORT,'fixture transient write'); END");
+    try {
+      for (let attempt = 0; attempt < 2; attempt++) assert.throws(() => record('new'), /fixture transient write/);
+      assert.deepEqual(ids(), ['base'], 'the rejected synchronous attempts must not have committed');
+    } finally {
+      db.exec('DROP TRIGGER fail_sync_save');
+    }
+    if (recovery === 'retry') record('new');
+    assert.equal((await flushTaskHistoryPersistence()).ok, true);
+    assert.deepEqual(ids(), recovery === 'retry' ? ['base', 'accepted', 'new'] : ['base', 'accepted'],
+      'recovery must preserve earlier accepted history exactly once, without replaying a rejected save or overwriting a successful retry');
+  }
+
   const clearConfig = { stateDir: path.join(stateDir, 'clear-boundary') };
   const historyDirectory = path.join(clearConfig.stateDir, 'sessions');
   const stage = (id, eventId) => recordTaskActivityEvent(clearConfig, {

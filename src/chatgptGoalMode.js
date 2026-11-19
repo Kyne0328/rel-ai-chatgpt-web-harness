@@ -177,6 +177,19 @@ function pendingOutcome(goal) {
     && Number(goal.continuationCount || 0) > 0 ? 'accepted' : 'uncertain');
 }
 
+const ORIGINAL_CHAT_REQUIRED = 'An earlier continuation may already have been sent. Its original chat is not identified, so it cannot be verified safely. Check the original chat manually; automatic retries are paused.';
+
+function missingOriginalChat(goal) {
+  if (!goal?.pendingNode || ['accepted', 'not_sent'].includes(pendingOutcome(goal))) return false;
+  const id = String(goal.conversationId || '').trim();
+  try { return !id || parseConversationUrl(id) !== id; } catch { return true; }
+}
+
+function pauseMissingOriginalChat(config, goal) {
+  return saveGoal(config, { ...goal, active: false, state: 'needs_user', pauseReason: 'missing_original_chat',
+    authRequired: false, challenge: null, nextAttemptAt: 0, error: ORIGINAL_CHAT_REQUIRED, updatedAt: Date.now() });
+}
+
 function goalConfiguration(args = {}, existing = {}) {
   const mode = args.mode ?? existing?.mode ?? 'goal';
   const strategy = args.strategy ?? existing?.strategy ?? (args.mode ? 'adaptive' : 'fixed');
@@ -224,13 +237,14 @@ function pauseGoal(config, args, context) {
     active: false, state: 'paused', nextAttemptAt: 0, pauseReason: 'user', updatedAt: Date.now()
   }));
   invalidateGoalPoll(goal.workId, 'GOAL_PAUSED');
-  return publicGoal(paused);
+  return publicGoal(config, paused);
 }
 
 function resumeGoal(config, args, context) {
   const goal = requireOwnedGoal(config, args, context);
   const task = statusForTask(config, goal);
   if (!task || terminalGoalState(task)) throw new Error('Cannot resume a finished, cancelled or unavailable work session.');
+  if (missingOriginalChat(goal)) throw new Error(ORIGINAL_CHAT_REQUIRED);
   const conversationId = args.conversationUrl ? parseConversationUrl(args.conversationUrl) : goal.conversationId;
   const switching = conversationId !== goal.conversationId;
   if (switching && goal.active && goal.binding) throw new Error('Stop this goal before changing its linked conversation.');
@@ -242,6 +256,10 @@ function resumeGoal(config, args, context) {
       ? conversationId : '', candidateSelectedAt: Date.now() } : {}),
     ...(switching ? { conversationId, binding: null, observedNode: '', stableSince: 0,
       pendingNode: '', pendingPrompt: '', pendingOutcome: 'not_sent' } : {}),
+    // Older paused records may only carry the pause reason. Preserve their
+    // invalidation on the binding across Resume until an actual branch read.
+    ...(!switching && current.binding?.version === 1 && current.pauseReason === 'binding_invalid'
+      ? { binding: { ...current.binding, revalidationRequired: true } } : {}),
     active: true, state: 'monitoring', resumedAt: Date.now(), nextAttemptAt: 0, error: '', pauseReason: '',
     retryCount: 0, helperFailureCount: 0, noProgressCount: 0, objectiveAchieved: false, updatedAt: Date.now()
   }), { reactivate: true, expectedRevision: goal.revision });
@@ -454,6 +472,7 @@ function activateGoal(config, args, context) {
   const owner = ownerFingerprint(context);
   const existing = loadGoal(config, workId);
   if (existing && existing.owner !== owner) throw new Error('Goal Mode owner mismatch.');
+  if (missingOriginalChat(existing)) throw new Error(ORIGINAL_CHAT_REQUIRED);
   const conversationId = args.conversationUrl ? parseConversationUrl(args.conversationUrl) : existing?.conversationId || '';
   const switchingConversation = Boolean(existing?.conversationId && conversationId && existing.conversationId !== conversationId);
   if (switchingConversation && existing.active) {
@@ -488,6 +507,7 @@ function activateGoal(config, args, context) {
 function goalStatus(config, args, context) {
   const goal = requireOwnedGoal(config, args, context);
   const result = callerGoal(config, goal, context);
+  if (result.pairingMarker || (goal.state === 'needs_user' && goal.pauseReason === 'connection_unavailable')) return result;
   const task = statusForTask(config, goal);
   if (goal.mode === 'loop' && !isTerminalTaskStatus(task?.status)
     && resolvedGoalPlan(task) === 'finished') return { ...result,
@@ -503,7 +523,7 @@ function stopGoalRecord(config, goal) {
   const stopped = mutateGoal(config, goal.workId, current => current.state === 'finished' ? current : ({ ...current, active: false,
     state: 'stopped', authRequired: false, nextAttemptAt: 0, updatedAt: Date.now() }));
   scheduleGoalRetry(config, stopped);
-  return publicGoal(stopped);
+  return publicGoal(config, stopped);
 }
 
 // The successful terminal transition also disables scheduled continuation.
@@ -516,7 +536,7 @@ function finishGoalMonitor(config, workId, expectedRevision, options = {}) {
   }
   const finished = mutateGoal(config, workId, current => ({ ...current,
     active: false, state: blocked ? 'blocked' : 'finished', objectiveAchieved: !blocked,
-    authRequired: false, nextAttemptAt: 0, error: '', updatedAt: Date.now()
+    authRequired: false, nextAttemptAt: 0, challenge: null, error: '', updatedAt: Date.now()
   }), { expectedRevision, successfulCompletion: !blocked });
   if (!finished || finished.revision !== expectedRevision + 1 || finished.objectiveAchieved !== !blocked) {
     throw Object.assign(new Error('Goal/Loop state changed before successful task completion. Retry against the current work_id.'),
@@ -533,8 +553,14 @@ function resumeAuthenticatedGoals(config, tunnelId) {
   for (const goal of listGoals(config)) {
     if (goal.tunnelId !== tunnelId || !(goal.state === 'needs_auth' || (goal.active && goal.authRequired))) continue;
     const task = statusForTask(config, goal);
-    if (!task || terminalGoalState(task) || resolvedGoalPlan(task)
+    const outcome = resolvedGoalPlan(task);
+    // A finished Loop iteration is not a finished work session. Keep actual
+    // blockers and finite resolved plans out of automatic sign-in recovery.
+    if (!task || terminalGoalState(task) || outcome === 'blocked'
+      || (outcome === 'finished' && (goal.mode !== 'loop' || task.status === 'blocked'
+        || task.status === 'waiting_for_approval' || task.cancellationRequestedAt))
       || (task.principalFingerprint && task.principalFingerprint !== goal.owner)) continue;
+    if (missingOriginalChat(goal)) { pauseMissingOriginalChat(config, goal); continue; }
     const updated = withStateDatabase(config, db => {
       const row = db.prepare('SELECT value FROM state_meta WHERE key=?').get(goalKey(goal.workId));
       if (!row) return null;
@@ -560,7 +586,7 @@ function resumeAuthenticatedGoals(config, tunnelId) {
 function stopGoal(config, args, context) {
   const workId = String(args.work_id || '').trim();
   requireOwnedGoal(config, args, context);
-  const stopped = publicGoal(mutateGoal(config, workId, current => current.state === 'finished' ? current : ({ ...current,
+  const stopped = publicGoal(config, mutateGoal(config, workId, current => current.state === 'finished' ? current : ({ ...current,
     active: false, state: 'stopped', authRequired: false, nextAttemptAt: 0, updatedAt: Date.now()
   })));
   clearBackgroundGoal(workId);
@@ -572,7 +598,7 @@ function stopGoal(config, args, context) {
 // Dashboard task control is authenticated locally and does not impersonate an MCP principal.
 function dashboardGoalStatus(config, workId) {
   const goal = loadGoal(config, String(workId || '').trim());
-  if (goal) return publicGoal(goal);
+  if (goal) return publicGoal(config, goal);
   return null;
 }
 
@@ -582,10 +608,23 @@ function stopDashboardGoal(config, workId) {
   return stopGoalRecord(config, goal);
 }
 
-function publicGoal(goal) {
+function bindingScopeMatches(goal) {
+  const binding = goal.binding;
+  return binding?.version !== 1 || Boolean(binding.conversationId && binding.conversationId === goal.conversationId
+    && binding.owner && binding.owner === goal.owner && binding.tunnelId === (goal.tunnelId || '')
+    && binding.messageId && binding.receiptMessageId && Number.isSafeInteger(binding.verifiedAt) && binding.verifiedAt > 0);
+}
+
+function publicGoal(config, goal) {
+  const scopeMismatch = !bindingScopeMatches(goal) || (goal.binding?.version === 1 && !readChatLink(config, goal)?.linkId);
+  const rechecking = goal.active && goal.binding?.revalidationRequired === true && !scopeMismatch;
+  const invalidBinding = scopeMismatch || goal.binding?.revalidationRequired === true
+    || ['binding_invalid', 'missing_original_chat'].includes(goal.pauseReason);
+  const binding = invalidBinding ? null : goal.binding;
   return { ok: true, work_id: goal.workId, goalActive: goal.active,
     modeAcknowledgement: { requested: goal.mode || 'goal', effective: goal.mode || 'goal',
-      readiness: goal.active && goal.binding && goal.state === 'monitoring' ? 'ready' : goal.state },
+      readiness: rechecking && goal.state === 'monitoring' ? 'linking' : invalidBinding && goal.active && !rechecking
+        ? 'needs_user' : goal.active && binding && goal.state === 'monitoring' ? 'ready' : goal.state },
     state: goal.state, mode: goal.mode || 'goal', strategy: goal.strategy || 'fixed',
     revision: Number(goal.revision || 0), objective: goal.objective,
     successCriteria: goal.successCriteria || [], brief: goal.brief || '',
@@ -594,15 +633,16 @@ function publicGoal(goal) {
     lastDecision: goal.lastDecision || null, iterationCount: Number(goal.iterationCount || 0),
     helperFailureCount: Number(goal.helperFailureCount || 0), noProgressCount: Number(goal.noProgressCount || 0),
     conversationId: goal.conversationId || null,
-    chatLink: { state: goal.pauseReason === 'binding_invalid' ? 'needs_attention' : goal.binding ? 'linked'
+    chatLink: { state: goal.state === 'needs_user' && goal.pauseReason === 'binding_ambiguous' ? 'conflicting_matches'
+      : invalidBinding && !rechecking ? 'needs_attention' : binding ? 'linked'
       : goal.authRequired || goal.state === 'needs_auth' ? 'waiting_for_account'
         : goal.state === 'rate_limited' ? 'rate_limited'
           : goal.active ? 'finding_chat'
             : ['stopped', 'finished', 'cancelled', 'completed_unverified'].includes(goal.state)
               || (goal.state === 'paused' && goal.pauseReason === 'user') ? 'inactive' : 'needs_attention',
       ...(goal.state === 'rate_limited' ? { rateLimitReason: goal.rateLimitReason || 'upstream' } : {}),
-      ...(goal.binding ? { version: goal.binding.version, verifiedAt: goal.binding.verifiedAt,
-        conversationUrl: 'https://chatgpt.com/c/' + goal.conversationId } : {}) },
+      ...(binding ? { version: binding.version, verifiedAt: binding.verifiedAt,
+        conversationUrl: 'https://chatgpt.com/c/' + binding.conversationId } : {}) },
     ...(goal.tunnelId ? { tunnelId: goal.tunnelId } : {}),
     continuationCount: Number(goal.continuationCount || 0), error: goal.error || undefined,
     retryCount: Number(goal.retryCount || 0), maxRetries: MAX_RETRIES,
@@ -612,7 +652,7 @@ function publicGoal(goal) {
 }
 
 function callerGoal(config, goal, context) {
-  const result = publicGoal(goal);
+  const result = publicGoal(config, goal);
   if (!context?.connector || !goal.active || goal.binding) return result;
   const link = readChatLink(config, goal);
   if (!link) return result;
@@ -644,12 +684,13 @@ function terminalGoalState(task) {
 function terminalMonitorOutcome(goal, task) {
   const state = terminalGoalState(task);
   if (!state) return null;
-  if (!task) return { state, error: 'Work session is unavailable; completion is unknown.' };
+  const terminal = { state, authRequired: false, nextAttemptAt: 0, challenge: null, error: '' };
+  if (!task) return { ...terminal, error: 'Work session is unavailable; completion is unknown.' };
   if (task.status === 'completed' && goal.mode === 'loop' && !goal.objectiveAchieved) return {
-    state: 'paused', error: 'The Loop work session was closed externally. It was not reopened.' };
+    ...terminal, state: 'paused', error: 'The Loop work session was closed externally. It was not reopened.' };
   if (task.status === 'completed' && goal.strategy === 'adaptive' && !goal.objectiveAchieved) return {
-    state: 'completed_unverified', error: 'The work session closed before adaptive success criteria were independently verified.' };
-  return { state, error: '' };
+    ...terminal, state: 'completed_unverified', error: 'The work session closed before adaptive success criteria were independently verified.' };
+  return terminal;
 }
 
 function continuationTaskUnchanged(previous, current, goal = {}) {
@@ -661,15 +702,22 @@ function continuationTaskUnchanged(previous, current, goal = {}) {
     && current.lastActivityAt === previous.lastActivityAt;
 }
 
+function pauseUnavailableConnection(config, goal) {
+  return saveGoal(config, { ...goal, active: false, state: 'needs_user', pauseReason: 'connection_unavailable',
+    authRequired: false, challenge: null, nextAttemptAt: 0, updatedAt: Date.now(),
+    error: 'The original ChatGPT connection is unavailable. Restore that same connection in Rel.AI. Then ask ChatGPT on that connection to resume this task and include its existing Work ID.' });
+}
+
 function retryGoal(config, goal, error, { notSent = false } = {}) {
   const terminal = terminalMonitorOutcome(goal, statusForTask(config, goal));
   if (terminal) return saveGoal(config, { ...goal, active: false, ...terminal, updatedAt: Date.now() });
+  const pending = notSent && goal.pendingOutcome !== 'accepted'
+    ? { pendingNode: '', pendingOutcome: 'not_sent', pendingPrompt: '' } : {};
+  if (error?.code === 'GOAL_ACCOUNT_UNAVAILABLE') return pauseUnavailableConnection(config, { ...goal, ...pending });
   const count = Number(goal.retryCount || 0);
   const exhausted = !error?.deferred && count >= MAX_RETRIES;
   const reason = error instanceof Error ? error.message : 'Goal continuation failed.';
-  const retried = saveGoal(config, { ...goal,
-    ...(notSent && goal.pendingOutcome !== 'accepted'
-      ? { pendingNode: '', pendingOutcome: 'not_sent', pendingPrompt: '' } : {}),
+  const retried = saveGoal(config, { ...goal, ...pending,
     active: !exhausted, state: exhausted ? (error?.status === 401 ? 'needs_auth' : 'paused')
       : error?.status === 429 || error?.rateLimitReason === 'read_budget' ? 'rate_limited'
       : !notSent && goal.pendingNode ? 'verifying' : 'retrying',
@@ -685,9 +733,10 @@ function retryGoal(config, goal, error, { notSent = false } = {}) {
   return retried;
 }
 
-function deferGoalDiscovery(config, goal, deps, error = null) {
+function deferGoalDiscovery(config, goal, deps, error = null, reason = '') {
   const terminal = terminalMonitorOutcome(goal, statusForTask(config, goal));
   if (terminal) return saveGoal(config, { ...goal, active: false, ...terminal, updatedAt: Date.now() });
+  if (error?.code === 'GOAL_ACCOUNT_UNAVAILABLE') return pauseUnavailableConnection(config, goal);
   const count = Number(goal.retryCount || 0);
   return saveGoal(config, { ...goal, discoveryScan: deps.discovery?.scan || null,
     rateLimitReason: error?.rateLimitReason === 'read_budget' ? 'read_budget' : 'upstream',
@@ -697,7 +746,8 @@ function deferGoalDiscovery(config, goal, deps, error = null) {
     nextAttemptAt: error?.status === 401 ? 0 : error?.retryAt ? Math.max(Number(error.retryAt), Date.now() + 1_000)
       : Date.now() + (RETRY_DELAYS_MS[count] || DISCOVERY_RETRY_MS),
     authRequired: error?.status === 401,
-    error: error ? detectionError(error) : '',
+    error: error ? detectionError(error) : reason === 'receipt_not_verified'
+      ? 'A candidate task receipt was not confirmed on the current branch. No chat was linked; verification will retry.' : '',
     updatedAt: Date.now() });
 }
 
@@ -810,16 +860,16 @@ async function pollGoal(config, workId, deps = {}) {
     if (goal.pendingNode && !goal.pendingOutcome) goal = saveGoal(config, { ...goal, pendingOutcome: pendingOutcome(goal) });
     const task = statusForTask(config, goal);
     if (!pauseStaleUnlinkedGoal(config, goal)?.active) return;
-    const terminalState = terminalGoalState(task);
-    if (terminalState) {
-      const unverified = task?.status === 'completed' && goal.strategy === 'adaptive' && !goal.objectiveAchieved;
-      const closedLoop = task?.status === 'completed' && goal.mode === 'loop' && !goal.objectiveAchieved;
-      saveGoal(config, { ...goal, active: false,
-        state: closedLoop ? 'paused' : unverified ? 'completed_unverified' : terminalState,
-        error: closedLoop ? 'The Loop work session was closed externally. It was not reopened.'
-          : unverified ? 'The work session closed before adaptive success criteria were independently verified.'
-            : task ? '' : 'Work session is unavailable; completion is unknown.',
-        updatedAt: Date.now() });
+    const terminal = terminalMonitorOutcome(goal, task);
+    if (terminal) {
+      saveGoal(config, { ...goal, ...terminal, active: false, updatedAt: Date.now() });
+      return;
+    }
+    if (missingOriginalChat(goal)) { pauseMissingOriginalChat(config, goal); return; }
+    if (goal.binding?.version === 1 && (!deps.linkId || !bindingScopeMatches(goal))) {
+      saveGoal(config, { ...goal, active: false, state: 'needs_user', pauseReason: 'binding_invalid', nextAttemptAt: 0,
+        binding: { ...goal.binding, revalidationRequired: true },
+        error: 'The stored chat link could not be verified for this task and connection. Monitoring is paused.' });
       return;
     }
     // A fully resolved plan needs work-session finalization, not another AI
@@ -848,25 +898,34 @@ async function pollGoal(config, workId, deps = {}) {
     const needsBinding = !goal.binding || deps.linkId && goal.binding.version !== 1;
     if ((!goal.conversationId || needsBinding) && (!goal.pendingNode || ['accepted', 'not_sent'].includes(pendingOutcome(goal)))) {
       deps = coordinatedGoalDeps(config, goal, deps);
+      const candidateExpired = !goal.binding && goal.candidateConversationId
+        && goal.conversationId === goal.candidateConversationId
+        && Date.now() - Number(goal.candidateSelectedAt || 0) >= CANDIDATE_RECEIPT_GRACE_MS;
       const match = await findRecentGoalCommand({ ...deps, startedAt: goal.createdAt, signal: controller.signal,
         conversationCorrelation: goal.conversationId || verifiedCorrelation(config, goal),
         explicitConversation: Boolean(goal.conversationId), workId,
-        verifyLegacy: Boolean(goal.conversationId && !deps.linkId), requireWorkReceipt: true, explicitGoal: true });
+        verifyLegacy: Boolean(goal.conversationId && !deps.linkId), requireWorkReceipt: true, explicitGoal: true }).catch(error => {
+        // A deleted or inaccessible hint cannot supply a receipt. Preserve the
+        // normal auth, cooldown and transport handling for all other failures.
+        if (candidateExpired && error?.endpoint === 'conversation_detail' && [403, 404].includes(error.status)) {
+          return { state: 'absent' };
+        }
+        throw error;
+      });
       if (controller.signal.aborted) return;
       if (match.state === 'ambiguous') {
-        saveGoal(config, { ...goal, active: false, state: 'needs_user',
+        saveGoal(config, { ...goal, active: false, state: 'needs_user', pauseReason: 'binding_ambiguous',
           error: 'Multiple chats contain this task receipt; automatic linking cannot identify a unique conversation.' });
         return;
       }
       if (match.state !== 'matched') {
-        if (goal.candidateConversationId && goal.conversationId === goal.candidateConversationId
-          && Date.now() - Number(goal.candidateSelectedAt || 0) >= CANDIDATE_RECEIPT_GRACE_MS) {
+        if (candidateExpired) {
           // Discard an unverified hint only after allowing the originating turn
           // to finish persisting its receipt. No hint can authorize a send.
           goal = saveGoal(config, { ...goal, conversationId: '', candidateConversationId: '' });
           if (!goal?.active || goal.conversationId) return;
         }
-        deferGoalDiscovery(config, goal, deps);
+        deferGoalDiscovery(config, goal, deps, null, match.reason);
         return;
       }
       const initiating = deps.linkId && goal.commandResolutionPending && match.command
@@ -882,10 +941,28 @@ async function pollGoal(config, workId, deps = {}) {
     if (controller.signal.aborted) return;
     goal = loadGoal(config, workId);
     if (!goal?.active || goal.conversationId !== observationConversationId || goal.revision !== observationRevision) return;
+    const rechecking = deps.linkId && goal.binding?.version === 1
+      && (goal.binding.revalidationRequired === true || goal.pauseReason === 'binding_invalid');
+    if (rechecking) {
+      // The task can be cancelled while the branch read is in flight without changing the Goal revision.
+      const terminal = terminalMonitorOutcome(goal, statusForTask(config, goal));
+      if (terminal) {
+        saveGoal(config, { ...goal, ...terminal, active: false, updatedAt: Date.now() });
+        return;
+      }
+    }
     if (deps.linkId && goal.binding?.version === 1 && !hasChatLinkReceipt(conversation, workId, deps.linkId, goal.binding)) {
       saveGoal(config, { ...goal, active: false, state: 'needs_user', pauseReason: 'binding_invalid',
+        binding: { ...goal.binding, revalidationRequired: true },
         error: 'The linked task receipt is no longer on this chat branch. Verify the intended conversation before continuing.' });
       return;
+    }
+    if (rechecking) {
+      const { revalidationRequired: _rechecked, ...binding } = goal.binding;
+      const verifyingSend = goal.pendingNode && !['accepted', 'not_sent'].includes(pendingOutcome(goal));
+      saveGoal(config, { ...goal, binding, pauseReason: '', state: verifyingSend ? 'verifying' : 'monitoring',
+        authRequired: false, challenge: null, retryCount: 0, nextAttemptAt: 0, error: '', updatedAt: Date.now() });
+      return; // Leave pending submission reconciliation to its normal path.
     }
     goal = observeGoalCommand(config, goal, conversation, snapshot);
     if (!goal?.active) return;
@@ -983,7 +1060,12 @@ function recoverAutomaticDiscovery(config) {
       && (!task.principalFingerprint || task.principalFingerprint === record.owner);
   };
   for (const goal of listGoals(config)) {
-    if (!eligible(goal)) continue;
+    const recoverable = eligible(goal);
+    if ((recoverable || goal.active) && missingOriginalChat(goal)) {
+      if (!terminalGoalState(statusForTask(config, goal))) pauseMissingOriginalChat(config, goal);
+      continue;
+    }
+    if (!recoverable) continue;
     mutateGoal(config, goal.workId, current => ({ ...current, active: true, state: 'linking',
       error: '', discoveryScan: null, retryCount: 0, nextAttemptAt: Date.now() }),
     { reactivate: true, expectedRevision: goal.revision });

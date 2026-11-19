@@ -31,7 +31,10 @@ async function logAudit(config, event, options = {}) {
     auditId: redacted.auditId || crypto.randomUUID()
   });
   try {
-    const integrity = await recordTaskIntegrityEvent(config, entry);
+    // Durable revalidation needs the exact check inputs, not the bounded audit projection.
+    const authorityEvent = Array.isArray(options.authoritativeValidationScope)
+      ? { ...entry, validationScope: options.authoritativeValidationScope } : entry;
+    const integrity = await recordTaskIntegrityEvent(config, authorityEvent);
     if (integrity) Object.assign(entry, integrity);
   } catch (error) {
     if (options.optionalIntegrity !== true || !/^TASK_INTEGRITY_/.test(String(error?.code || ''))) throw error;

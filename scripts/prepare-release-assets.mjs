@@ -10,18 +10,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 function prepareReleaseAssets(directory = path.join(root, 'dist')) {
   const version = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version;
   const names = releaseArtifactNames(version);
-  const builtAssets = [
-    names.installer,
-    names.portable,
-    names.blockmap,
-    names.metadata,
-    names.linuxAppImage,
-    names.linuxDeb,
-    names.linuxMetadata,
-    names.macDmgX64,
-    names.macDmgArm64,
-    names.sbom
-  ];
+  const builtAssets = Object.values(names).filter(name => name !== names.macMetadata && name !== names.checksums);
   for (const name of builtAssets) requireFile(path.join(directory, name), `Required release output ${name}`);
 
   writeMacUpdaterMetadata(directory, names, version);

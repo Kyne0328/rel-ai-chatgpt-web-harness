@@ -397,11 +397,11 @@ function normalizeTaskHistoryCursor(value: unknown): { updatedAtMs: number; id: 
 function normalizeActivityHistoryCursor(value: unknown): { eventTimestamp: string; taskUpdatedAtMs: number; taskId: string; eventIndex: number } | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const record = value as JsonRecord;
-  const eventTimestamp = String(record.eventTimestamp || '').trim();
+  const eventTimestamp = record.eventTimestamp;
   const taskUpdatedAtMs = Math.max(0, Math.floor(Number(record.taskUpdatedAtMs || 0)));
   const taskId = String(record.taskId || '').trim();
   const eventIndex = Math.floor(Number(record.eventIndex ?? -1));
-  return eventTimestamp && taskUpdatedAtMs && taskId && eventIndex >= 0
+  return typeof eventTimestamp === 'string' && taskUpdatedAtMs && taskId && eventIndex >= 0
     ? { eventTimestamp, taskUpdatedAtMs, taskId, eventIndex }
     : null;
 }

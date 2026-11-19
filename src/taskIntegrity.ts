@@ -483,7 +483,7 @@ function applyValidationState(authority: IntegrityAuthority, workspaceState: Wor
   authority.validationLevel = clean(event.validationLevel);
   authority.validationFingerprint = clean(event.validationFingerprint);
   authority.validationScope = Array.isArray(event.validationScope)
-    ? unique(event.validationScope.map(normalizePath).filter(Boolean)).slice(0, 1000)
+    ? unique(event.validationScope.map(normalizePath).filter(Boolean))
     : authority.validationScope || [];
   if (authority.validationResult !== 'passed') return;
   authority.hasPassedValidation = true;
@@ -1004,6 +1004,7 @@ export {
   assertTaskWorkspaceRoot,
   claimTaskChangedFiles,
   captureNativeMutationPaths,
+  deliverableTaskOwnedFiles,
   readTaskIntegrity,
   readWorkspaceIntegrity,
   recordTaskIntegrityEvent,

@@ -169,6 +169,8 @@ try {
     assert.equal(route.loadingSeen, false, `MCP activity exposed a loading placeholder on #${route.route}: ${JSON.stringify(route)}`);
     assert.deepEqual(route.mainFrameNavigationDelta, { didStartNavigation: 0, didNavigate: 0, didFinishLoad: 0 }, `MCP activity navigated the main frame on #${route.route}`);
   }
+  assert.deepEqual(result.overlayFocusReturns, { unchanged: 'commandPaletteBtn', disabled: 'pageTitle', hidden: 'pageTitle', handoff: 'pageTitle' },
+    'dismissal must keep keyboard focus on a usable target, without overriding a newer handoff');
   assert.deepEqual(result.updateModalTransitions, {
     installingLocked: true,
     repeated: { samePanel: true, focusPreserved: true, closeAvailable: true },

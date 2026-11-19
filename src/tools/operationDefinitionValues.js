@@ -262,7 +262,7 @@ const OPERATION_DEFINITION_VALUES = [
   {
     name: OP.CHANGES_CHECKPOINT,
     title: "Checkpoint Review Artifact",
-    description: "Create an immutable workspace-bound review checkpoint. With work_id it defaults to the task-owned diff; without work_id it checkpoints workspace scope. scope:'task' requires work_id. The stored payload is integrity-checked and can be replayed later by checkpointId without depending on the current working tree.",
+    description: "Create an immutable workspace-bound review checkpoint. With work_id it defaults to the task-owned diff; without work_id it checkpoints workspace scope. scope:'task' requires work_id. Replay reads the integrity-checked review even if the working tree changes. A checkpoint is not a file backup.",
     inputSchema: {"type":"object","properties":{"workspace":{"type":"string"},"staged":{"type":"boolean"},"path":{"type":"string"},"redactSensitive":{"type":"boolean"},"scope":{"type":"string","enum":["task","workspace"]},"maxBytes":{"type":"number","minimum":1000,"maximum":5242880}},"required":["workspace"],"additionalProperties":false},
     handlerName: 'reviewCheckpoint',
     groups: ["audit"],
@@ -280,7 +280,7 @@ const OPERATION_DEFINITION_VALUES = [
   {
     name: OP.CHANGES_RESTORE,
     title: "Restore Tracked Paths",
-    description: "Restore only the listed tracked paths from HEAD. This does not remove untracked files and does not affect unrelated paths.",
+    description: "Overwrite unstaged changes in the named tracked files with their versions in the Git index (staging area). Restore does not read a checkpoint, modify the index, or remove untracked files.",
     inputSchema: {"type":"object","properties":{"workspace":{"type":"string"},"paths":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":100}},"required":["workspace","paths"],"additionalProperties":false},
     handlerName: 'restorePaths',
     groups: ["cleanup"],

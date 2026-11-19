@@ -28,7 +28,7 @@ import { runComputerAction } from '../computerManager.js';
 import { relaiSemanticSearch } from '../bridge/semanticSearch.js';
 import { repositoryIntelligence } from '../repository/intelligence/service.js';
 import { relaiDiagnosticsRun } from '../bridge/diagnosticsRunner.js';
-import { readTaskIntegrity, releaseTaskChangedFiles, taskCommitOwnership, taskOwnedChangedFiles } from '../taskIntegrity.ts';
+import { deliverableTaskOwnedFiles, readTaskIntegrity, releaseTaskChangedFiles, taskCommitOwnership, taskOwnedChangedFiles } from '../taskIntegrity.ts';
 import { readRecentWorkflowEvidence, readRelevantTaskEpisodes } from '../taskHistoryStore.ts';
 import { selectRelevantSkills } from '../skillDiscovery.js';
 import { buildTaskContinuity, rankBootstrapGroups } from '../context/taskContinuity.js';
@@ -56,7 +56,7 @@ const startTaskHandler = async (config, args = {}, context = {}) => {
   const current = activity.tasks.find(item => String(item.id || item.taskId || '') === task.work_id);
   const hasPlan = Array.isArray(current?.plan?.steps) && current.plan.steps.length > 0;
   const initialSteps = Array.isArray(args.steps) && args.steps.length ? args.steps : defaultTaskSteps(args);
-  const progress = hasPlan ? null : applyTaskProgressPatch(task.work_id, { steps: initialSteps });
+  const progress = hasPlan ? null : await applyTaskProgressPatch(config, task.work_id, { steps: initialSteps }, undefined, context);
   const activeRelatedWork = compactActiveRelatedWork(activity, current || {});
   let chatLink;
   let modeAcknowledgement;
@@ -182,7 +182,7 @@ function scheduleIntelligenceWarmup(workspace, config) {
 const taskPlanHandler = async (config, args, context) => {
   const taskId = String(context?.taskId || args.work_id || '').trim();
   const workspace = String(context?.requestTaskContext?.session?.workspace || '').trim();
-  const result = applyTaskProgressPatch(taskId, { steps: args.steps });
+  const result = await applyTaskProgressPatch(config, taskId, { steps: args.steps }, undefined, context);
   const plan = result?.plan || { revision: 0, steps: [] };
   // Legacy fixed Goal Mode retains its explicit plan-close behavior.
   // Adaptive goals require evidence evaluation; Loop plans finish iterations,
@@ -323,14 +323,17 @@ function withWorkflowTaskContext(config, workspace, args, context = {}) {
 function withTaskOwnedReviewContext(config, workspace, args, context = {}) {
   const taskId = String(context.taskId || args.work_id || '').trim();
   if (!taskId || args.scope === 'workspace') return args;
-  const requestState = requestTaskState(context, taskId);
-  if (Array.isArray(requestState?.integrity?.taskOwnedChangedFiles)) {
-    return { ...args, _taskOwnedPaths: [...requestState.integrity.taskOwnedChangedFiles] };
-  }
-  if (!readTaskIntegrity(config, taskId, workspace.alias)) {
+  const cached = requestTaskState(context, taskId)?.integrity;
+  const integrity = cached || readTaskIntegrity(config, taskId, workspace.alias);
+  if (!integrity) {
     throw taskError('TASK_INTEGRITY_STATE_MISSING', 'Task-scoped review requires authoritative owned-path evidence. The requested review was not broadened to workspace scope.', { retryable: false });
   }
-  return { ...args, _taskOwnedPaths: taskOwnedChangedFiles(config, taskId, workspace.alias) };
+  const paths = deliverableTaskOwnedFiles(integrity);
+  const mixed = new Set([...(integrity.baseline?.changedFiles || []), ...taskCommitOwnership(config, taskId, workspace.alias).conflictingFiles]);
+  // Ownership caveats describe only already selected paths; they never widen the diff.
+  return { ...args, _taskOwnedPaths: paths, _mixedOwnershipPaths: paths.filter(file => mixed.has(file)),
+    // A later status read cannot prove what was dirty when this task began.
+    _scopeUncertain: integrity.baseline?.observationComplete !== true };
 }
 
 function withTaskOwnedCommitContext(config, workspace, args, context = {}) {

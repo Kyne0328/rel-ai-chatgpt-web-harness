@@ -186,6 +186,7 @@ app.whenReady().then(async () => {
   accessibility.push(goalAccounts.accessibility);
   const usageRequestOrdering = await exerciseUsageRequestOrdering(win);
   const updateModalTransitions = await exerciseUpdateModalTransitions(win);
+  const overlayFocusReturns = await exerciseOverlayFocusReturns(win);
 
   await win.webContents.executeJavaScript(`location.hash = '#tasks'`);
   await waitFor(win, `document.querySelectorAll('.task-row').length >= 9`);
@@ -646,6 +647,7 @@ app.whenReady().then(async () => {
     goalAccounts,
     usageRequestOrdering,
     updateModalTransitions,
+    overlayFocusReturns,
     taskInteraction,
     taskSelectionStability,
     taskProcesses,
@@ -672,6 +674,44 @@ app.whenReady().then(async () => {
 // fixture changes returned receipt data only; it never replaces feature DOM.
 
 
+
+
+async function exerciseOverlayFocusReturns(win) {
+  const result = {};
+  for (const state of ['unchanged', 'disabled', 'hidden', 'handoff']) {
+    await win.webContents.executeJavaScript(`(() => {
+      const button = document.getElementById('commandPaletteBtn');
+      button.focus(); button.click();
+    })()`);
+    await waitFor(win, `document.activeElement?.matches('.command-search')`);
+    await win.webContents.executeJavaScript(`(() => {
+      const state = ${JSON.stringify(state)};
+      const button = document.getElementById('commandPaletteBtn');
+      const input = document.querySelector('.command-search');
+      if (state === 'disabled') button.disabled = true;
+      if (state === 'hidden') button.style.display = 'none';
+      if (state === 'handoff') {
+        const observer = new MutationObserver(() => {
+          if (!input.isConnected) {
+            observer.disconnect();
+            document.getElementById('pageTitle').focus();
+          }
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+      }
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    })()`);
+    await waitFor(win, `!document.querySelector('.command-search')`);
+    await waitForCapturePaint(win);
+    result[state] = await win.webContents.executeJavaScript(`(() => {
+      const focused = document.activeElement?.id || '';
+      const button = document.getElementById('commandPaletteBtn');
+      button.disabled = false; button.style.removeProperty('display');
+      return focused;
+    })()`);
+  }
+  return result;
+}
 
 async function exerciseUpdateModalTransitions(win) {
   await win.webContents.executeJavaScript(`(async () => {

@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { assertPromotableCandidate } from './release-artifacts.mjs';
 
 const version = String(process.argv[2] || '').trim().replace(/^v/i, '');
 if (!/^\d+\.\d+\.\d+$/.test(version)) {
@@ -11,7 +12,7 @@ const executable = process.platform === 'win32' ? 'gh.exe' : 'gh';
 const inspection = spawnSync(executable, [
   'release', 'view', version,
   '--repo', repository,
-  '--json', 'isDraft,isPrerelease,assets'
+  '--json', 'tagName,isDraft,isPrerelease,assets'
 ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 });
 if (inspection.error || inspection.status !== 0) {
   console.error(`Could not inspect release candidate: ${inspection.error?.message || inspection.stderr?.trim() || 'GitHub CLI failed.'}`);
@@ -24,14 +25,10 @@ try {
   console.error('GitHub CLI returned invalid release candidate metadata.');
   process.exit(1);
 }
-if (candidate?.isDraft !== false || candidate?.isPrerelease !== true || !Array.isArray(candidate?.assets)) {
-  console.error('Only a published prerelease candidate can be promoted to stable.');
-  process.exit(1);
-}
-const assets = new Set(candidate.assets.map(asset => asset?.name));
-const missing = ['latest.yml', 'latest-linux.yml', 'latest-mac.yml', 'SHA256SUMS.txt'].filter(name => !assets.has(name));
-if (missing.length) {
-  console.error(`Release candidate is missing required metadata: ${missing.join(', ')}`);
+try {
+  assertPromotableCandidate(version, candidate);
+} catch (error) {
+  console.error(error instanceof Error ? error.message : String(error));
   process.exit(1);
 }
 

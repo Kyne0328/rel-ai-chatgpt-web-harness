@@ -115,6 +115,7 @@ function normalizeOpenAIPatchFormat(input) {
     if (/^\*\*\* End Patch\b/.test(line)) break;
     i = handleOpenAIPatchSection(lines, i, out);
   }
+  requirePatchTerminator(lines[i]);
   return { patch: `${out.join("\n")}\n`, converted: true, sourceFormat: "openai-patch" };
 }
 
@@ -306,6 +307,12 @@ function applyStructuredPlan(workspace, config, plan, signal) {
   }
 }
 
+function requirePatchTerminator(line) {
+  if (!/^\*\*\* End Patch[ \t]*$/.test(line || '')) {
+    throw new Error("Incomplete OpenAI patch: expected a closing '*** End Patch' line.");
+  }
+}
+
 function parseOpenAIPatchDocument(input) {
   const lines = String(input || "").replaceAll("\r\n", "\n").split("\n");
   const operations = [];
@@ -335,6 +342,7 @@ function parseOpenAIPatchDocument(input) {
     }
     operations.push({ type, path: pathText, lines: body });
   }
+  requirePatchTerminator(lines[index]);
   if (operations.length === 0) {
     throw new Error("OpenAI patch did not contain any file operations.");
   }

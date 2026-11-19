@@ -6,6 +6,7 @@ import path from 'node:path';
 import { readGuiConfig, hasExistingConfig } from '../electron/launcher-utils.js';
 import { importResourceModule } from '../electron/resource-path.js';
 import { saveLauncherConfig } from '../electron/launcher-config.js';
+import { createShutdownCoordinator } from '../electron/shutdown-coordinator.js';
 import { createDesktopServiceRuntime } from '../electron/service-runtime.js';
 
 const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-service-runtime-'));
@@ -103,6 +104,7 @@ try {
     pushStatus() {}
   });
 
+  assert.equal(runtime.getDashboardConnectionIdentity(), null, 'a stopped runtime has no reusable dashboard identity');
   const startPromise = runtime.startServer();
   await new Promise(resolve => setImmediate(resolve));
 
@@ -162,6 +164,9 @@ try {
   await racingStart;
   assert.equal((await racingReadiness).serverRunning, true, 'foreground readiness must belong to the replacement service');
   assert.equal(localStartCalls, 2, 'the deferred start must run after shutdown completes');
+  const activeDashboard = runtime.getDashboardConnectionIdentity();
+  assert.equal(activeDashboard.origin, 'http://127.0.0.1:4567', 'warm identity must use the actual bound port');
+  assert.ok(activeDashboard.authGeneration > 0);
   const doctor = await runtime.runTunnelDoctor();
   assert.equal(doctor.ok, true);
   assert.deepEqual(doctorArgs, {
@@ -176,10 +181,13 @@ try {
   tunnelStopGate = deferred();
   const reconnecting = runtime.restartConnection();
   await new Promise(resolve => setImmediate(resolve));
+  assert.notEqual(runtime.getDashboardConnectionIdentity().authGeneration, activeDashboard.authGeneration,
+    'preserving a window across a new lifecycle generation must invalidate warm reuse');
   const queuedSettingsReconnect = runtime.restartConnection({ afterPending: true });
   assert.equal(additionalTunnelStopCalls, additionalStopsBeforeReconnect,
     'primary reconnect must keep healthy additional tunnels running');
   const stoppingReconnect = runtime.stopServer({ preserveDashboard: true });
+  assert.equal(runtime.getDashboardConnectionIdentity(), null, 'an in-flight stop must not offer a reusable identity');
   await new Promise(resolve => setImmediate(resolve));
   tunnelStopGate.resolve();
   await Promise.all([reconnecting, stoppingReconnect, queuedSettingsReconnect]);
@@ -378,6 +386,58 @@ try {
   const terminalFailure = await terminalRuntime.startServer();
   assert.equal(terminalFailure.tunnelStatus, 'failed');
   assert.equal(terminalFailure.errorCode, 'tunnel_runtime_unavailable', 'permanent local tunnel runtime failures must remain terminal through the desktop service layer');
+
+
+  // A final desktop shutdown can join a tray/IPC stop, even after dashboard close began.
+  for (const mode of ['standalone', 'during-stop', 'during-window-close', 'disposal-rejected']) {
+    const local = deferred(), windowClosing = deferred(), windowDone = deferred();
+    const finalStop = deferred(), disposing = deferred(), disposed = deferred();
+    let stops = 0, disposals = 0, cleanMarks = 0;
+    const runtime = createDesktopServiceRuntime({
+      app: { getVersion: () => 'fixture' },
+      serviceProcessClient: {
+        async stop() { stops++; await local.promise; return { cleanup: { clean: true } }; },
+        async dispose(options) {
+          assert.deepEqual(options, { stop: false });
+          disposals++; disposing.resolve(); await disposed.promise;
+          if (mode === 'disposal-rejected') throw new Error('fixture utility disposal rejected');
+        }
+      },
+      secureTunnelRuntime: { async stop() { return { stopped: true, exited: true }; } },
+      dashboardWindowManager: { async close() { windowClosing.resolve(); await windowDone.promise; } },
+      replaceCurrentStatus() {}
+    });
+    const ordinary = mode === 'standalone' ? null : runtime.stopServer();
+    // Observe a shared rejection immediately, without changing what the coordinator receives.
+    const ordinaryOk = ordinary?.then(() => true, () => false);
+    if (mode === 'during-window-close') { local.resolve(); await windowClosing.promise; }
+    const coordinator = createShutdownCoordinator({
+      stopService() {
+        const stop = runtime.stopServer({ terminateUtility: true });
+        finalStop.resolve();
+        assert.equal(runtime.stopServer({ terminateUtility: true }), stop, 'duplicate final stops share one transition');
+        if (ordinary) assert.equal(stop, ordinary);
+        return stop;
+      },
+      markCleanShutdown() { cleanMarks++; }
+    });
+    const prepared = coordinator.prepare('update');
+    await finalStop.promise;
+    local.resolve(); windowDone.resolve();
+    assert.equal(await Promise.race([disposing.promise.then(() => 'disposal'), prepared.then(() => 'prepared')]),
+      'disposal', mode + ': final shutdown must request utility disposal before publishing clean');
+    assert.equal(cleanMarks, 0);
+    disposed.resolve();
+    const result = await prepared;
+    const success = mode !== 'disposal-rejected';
+    assert.equal(result.clean, success);
+    if (!success) assert.match(result.errors.find(item => item.step === 'service')?.message || '', /utility disposal rejected/);
+    if (ordinary) assert.equal(await ordinaryOk, success);
+    assert.equal(cleanMarks, Number(success));
+    assert.deepEqual([stops, disposals], [1, 1]);
+    assert.equal((await runtime.stopServer()).cleanup.clean, true);
+    assert.deepEqual([stops, disposals], [2, 1], 'a new ordinary stop must not inherit terminal disposal intent');
+  }
 
   const connectionState = await importResourceModule('src/connectionProfile.js');
   connectionState.writeLaunchEnv({ REL_AI_MCP_PORT: '3333', REL_AI_MCP_TOKEN: 'local-token',

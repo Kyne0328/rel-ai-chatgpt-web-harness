@@ -11,7 +11,10 @@ const SCHEMA_VERSION = 2;
 
 function beginStructuredPatchTransaction(config, workspace, snapshots, expectedStates = []) {
   // Never discard an unresolved recovery record, including callers outside the wrapper.
-  recoverStructuredPatchTransaction(config, workspace);
+  const recovery = recoverStructuredPatchTransaction(config, workspace);
+  if (recovery.cleanupPending && recoveryWorkspace(config, workspace) !== workspace) {
+    throw pendingRecovery('The previous edit journal could not be cleared. Retry recovery before starting a new edit.');
+  }
   const file = transactionPath(config, workspace);
   const expectedByPath = new Map((expectedStates || []).map(state => [String(state.path || ''), state]));
   const entries = (snapshots || []).map(snapshot => {
@@ -66,18 +69,17 @@ function completeStructuredPatchTransaction(config, workspace) {
 }
 
 function inspectStructuredPatchTransaction(config, workspace) {
-  assertNoOverlappingTransaction(config, workspace);
-  const record = readTransaction(config, workspace);
+  const record = readTransaction(config, recoveryWorkspace(config, workspace));
   const status = record ? (record.status || 'active') : 'absent';
   return { pending: Boolean(record && !['committed', 'rolled_back'].includes(status)), status };
 }
 
 function recoverStructuredPatchTransaction(config, workspace) {
-  assertNoOverlappingTransaction(config, workspace);
-  const record = readTransaction(config, workspace);
+  const journalWorkspace = recoveryWorkspace(config, workspace);
+  const record = readTransaction(config, journalWorkspace);
   if (!record) return { recovered: false, restored: [] };
   if (record.status === 'committed' || record.status === 'rolled_back') {
-    return { recovered: false, committed: record.status === 'committed', restored: [], ...cleanupTransaction(config, workspace) };
+    return { recovered: false, committed: record.status === 'committed', restored: [], ...cleanupTransaction(config, journalWorkspace) };
   }
   const recoveryPlan = record.entries.map(entry => {
     if (!entry || typeof entry !== 'object' || typeof entry.path !== 'string') {
@@ -112,10 +114,10 @@ function recoverStructuredPatchTransaction(config, workspace) {
     restored.push(safe.relativePath);
   }
   // Successful rollback also needs a terminal decision before best-effort cleanup.
-  writeJsonAtomic(transactionPath(config, workspace), {
+  writeJsonAtomic(transactionPath(config, journalWorkspace), {
     ...record, schemaVersion: SCHEMA_VERSION, status: 'rolled_back', completedAt: new Date().toISOString()
   }, { mode: 0o600 });
-  return { recovered: true, restored, ...cleanupTransaction(config, workspace) };
+  return { recovered: true, restored, ...cleanupTransaction(config, journalWorkspace) };
 }
 
 function assertRecoverableState({ entry, safe, originalContent }) {
@@ -150,27 +152,51 @@ function readTransactionFile(file) {
   });
 }
 
-function assertNoOverlappingTransaction(config, workspace) {
+function recoveryWorkspace(config, workspace) {
   const ownFile = transactionPath(config, workspace);
   let files;
   try { files = fs.readdirSync(path.dirname(ownFile)); }
-  catch (error) { if (error?.code === 'ENOENT') return; throw error; }
-  const pending = message => Object.assign(new Error(message), {
-    code: 'WORKSPACE_EDIT_RECOVERY_PENDING', executed: false, retryable: false
-  });
-  if (files.length > 1000) throw pending('Edit recovery inventory is incomplete; changes remain blocked.');
+  catch (error) { if (error?.code === 'ENOENT') return workspace; throw error; }
+  let equivalent;
+  if (files.length > 1000) throw pendingRecovery('Edit recovery inventory is incomplete; changes remain blocked.');
   const root = physicalRoot(workspace.path);
   for (const name of files) {
     if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
     const file = path.join(path.dirname(ownFile), name);
     if (file === ownFile) continue;
     const record = readTransactionFile(file);
-    if (!record || ['committed', 'rolled_back'].includes(record.status)) continue;
+    if (!record) continue;
+    if (sameWindowsDirectorySpelling(workspace.path, record.workspaceRoot)) {
+      const owner = { ...workspace, path: record.workspaceRoot };
+      if (equivalent || files.includes(path.basename(ownFile)) || transactionPath(config, owner) !== file) {
+        throw pendingRecovery('Multiple or inconsistent edit journals match this workspace. No recovery was performed.');
+      }
+      equivalent = owner;
+      continue;
+    }
+    if (['committed', 'rolled_back'].includes(record.status)) continue;
     const otherRoot = physicalRoot(record.workspaceRoot);
     if (isPathInside(root, otherRoot) || isPathInside(otherRoot, root)) {
-      throw pending('An overlapping project folder has an interrupted edit transaction. Recover it through its original workspace before changing this folder.');
+      throw pendingRecovery('An overlapping project folder has an interrupted edit transaction. Recover it through its original workspace before changing this folder.');
     }
   }
+  return equivalent || workspace;
+}
+
+function pendingRecovery(message) {
+  return Object.assign(new Error(message), { code: 'WORKSPACE_EDIT_RECOVERY_PENDING', executed: false, retryable: false });
+}
+
+function sameWindowsDirectorySpelling(left, right) {
+  if (process.platform !== 'win32') return false;
+  const a = path.resolve(left), b = path.resolve(right);
+  if (a === b || a.toLowerCase() !== b.toLowerCase()) return false;
+  try {
+    if (realRootOf(a) !== realRootOf(b)) return false;
+    const first = fs.statSync(a, { bigint: true }), second = fs.statSync(b, { bigint: true });
+    return first.isDirectory() && second.isDirectory() && first.ino !== 0n
+      && first.ino === second.ino && first.dev === second.dev;
+  } catch { return false; }
 }
 
 function physicalRoot(directory) {

@@ -163,7 +163,7 @@ try {
   assert.equal(ri8Iteration.iterationCompleted, true);
   assert.equal(ri8Iteration.completionKnown, false);
   const ri8AwaitingCompletion = await callTool('relai_work', { action: 'goal_status', work_id: ri8.work_id }, ri8Owner);
-  assert.match(ri8AwaitingCompletion.nextAction || '', /action "complete"/);
+  assert.ok(ri8.pairingMarker && ri8AwaitingCompletion.pairingMarker === ri8.pairingMarker && /pairingMarker exactly once/.test(ri8AwaitingCompletion.nextAction), 'unpaired goal status must ask for its original chat marker before advising completion');
   assert.match(ri8Iteration.nextAction, /action "complete"/);
   // Simulate an HTTP 429 linkage cooldown already active at the monitor layer.
   const { updateGoal: mutateRi8Goal } = await import('../src/chatgptGoalState.js');

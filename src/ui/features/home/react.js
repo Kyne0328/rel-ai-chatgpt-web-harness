@@ -15,7 +15,7 @@ import { formatDuration, timeAgo } from '../../utils.js';
 import { buildTaskSemanticProgress } from '../../../taskSemanticProgress.js';
 import { completeDesktopSetup, desktopSetupSteps, dismissDesktopSetup, isDesktopSetupDismissed } from '../onboarding/index.js';
 import { CHATGPT_CONNECTOR_CREATE_URL, chatGptFirstPrompt, chatGptGuideSteps } from '../settings/connection-guidance.js';
-import { loadAnalyticsData } from '../usage/data.js';
+import { loadAnalyticsData, subscribeAnalyticsReset } from '../usage/data.js';
 import { desktopSetupState, homeAnalyticsView, overviewState, overviewWorkspaceStatus } from './index.js';
 
 const h = React.createElement;
@@ -274,17 +274,23 @@ function RecentTasksCard({ tasks }) {
 }
 
 function HomeAnalytics({ workspace }) {
+  const desktop = globalThis.window?.relaiDesktop;
+  const [resetRevision, setResetRevision] = useState(0);
   const [analytics, setAnalytics] = useState({ scope: null, error: false, loading: true });
+  useEffect(() => subscribeAnalyticsReset(desktop, () => {
+    setAnalytics({ scope: null, error: false, loading: true });
+    setResetRevision(value => value + 1);
+  }), [desktop]);
   useEffect(() => {
     let active = true;
     const timer = window.setTimeout(() => {
       setAnalytics(current => ({ ...current, loading: !current.scope, error: false }));
-      void loadAnalyticsData({ desktop: globalThis.window?.relaiDesktop, range: '24h', now: new Date(), workspace })
+      void loadAnalyticsData({ desktop, range: '24h', now: new Date(), workspace })
         .then(({ current }) => { if (active) setAnalytics({ scope: current, error: false, loading: false }); })
         .catch(() => { if (active) setAnalytics(current => ({ ...current, error: true, loading: false })); });
     }, 180);
     return () => { active = false; window.clearTimeout(timer); };
-  }, [workspace]);
+  }, [desktop, workspace, resetRevision]);
   if (analytics.scope) return h(HomeAnalyticsContent, { scope: analytics.scope, refreshing: analytics.loading });
   return h('section', { className: 'card home-analytics-card compact-summary', 'data-home-analytics': '', 'aria-busy': analytics.loading ? 'true' : 'false' },
     h('div', { className: 'card-head home-analytics-head' },

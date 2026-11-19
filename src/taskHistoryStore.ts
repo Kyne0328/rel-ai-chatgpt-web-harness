@@ -795,15 +795,16 @@ function persistSession(directory: string, session: TaskRecord, options: Persist
       schedulePendingDirectoryFlush(directory, 0);
       return;
     }
-    pendingSessions.delete(key);
-    if (!pendingSessionEntriesForDirectory(directory).length) clearPendingDirectoryFlush(directory);
     try {
       writeSession(directory, session);
-      recordTaskHistoryPersistenceSuccess();
     } catch (error) {
       recordTaskHistoryPersistenceFailure(error, 1);
       throw error;
     }
+    // Retire previously accepted deferred history only after its replacement commits.
+    pendingSessions.delete(key);
+    if (!pendingSessionEntriesForDirectory(directory).length) clearPendingDirectoryFlush(directory);
+    recordTaskHistoryPersistenceSuccess();
     scheduleTaskHistoryPrune(directory);
     return;
   }

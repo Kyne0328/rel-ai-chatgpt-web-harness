@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import './fixtures/git-draft-remote-base.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -11,6 +12,9 @@ import { workspaceGitStatus } from "../src/repo/gitOps.js";
 import { writeSessionPolicy } from "../src/policyResolver.js";
 import { GIT_EXECUTABLE } from './helpers/git-executable.mjs';
 import { checkGitRepository } from '../src/repo/gitClient.ts';
+import { HANDLERS } from '../src/tools/handlers.js';
+import { serializeConnectorResult } from '../src/tools/connector.js';
+import { OPERATION_IDS as OP } from '../src/tools/operationIds.js';
 
 function git(args, options = {}) {
   return execFileSync(GIT_EXECUTABLE, args, options);
@@ -335,6 +339,51 @@ fs.writeFileSync(path.join(workspace.path, 'untracked-review.txt'), 'review this
 const untrackedReview = await relaiDiff(workspace, config, { path: 'untracked-review.txt' });
 assert.match(untrackedReview.diff, /new file mode/);
 assert.match(untrackedReview.diff, /\+review this content/);
+assert.equal(untrackedReview.diffTruncated, false);
+assert.equal(untrackedReview.untrackedReadOmitted, false);
+
+for (const file of ['README.md', 'untracked-review.txt']) {
+  fs.writeFileSync(path.join(workspace.path, file), 'one fixture line\n'.repeat(500));
+  const raw = await HANDLERS.reviewCheckpoint(config, { path: file, maxBytes: 1000 }, { workspaceOverride: workspace });
+  const saved = serializeConnectorResult({ publicName: 'relai_changes', action: 'checkpoint', operationName: OP.CHANGES_CHECKPOINT, value: raw });
+  assert.equal(saved.diffTruncated, true, 'tracked and untracked byte limits survive checkpoint creation');
+  assert.ok(saved.warning);
+  const replay = await HANDLERS.reviewReplay(config, { checkpointId: raw.checkpointId }, { workspaceOverride: workspace });
+  const receipt = serializeConnectorResult({ publicName: 'relai_changes', action: 'replay', operationName: OP.CHANGES_REPLAY, value: replay });
+  assert.equal(receipt.diffTruncated, true);
+  assert.equal(receipt.warning, saved.warning);
+  assert.equal(receipt.diff, saved.diff);
+}
+
+// The selected file is present for Git status but unavailable to the preview.
+const denied = path.resolve(workspace.path, 'untracked-review.txt');
+const originalOpen = fs.openSync;
+let attempts = 0;
+let partial;
+try {
+  fs.openSync = function (file, ...args) {
+    if (typeof file === 'string' && path.resolve(file) === denied) {
+      attempts++;
+      throw Object.assign(new Error('private host diagnostic marker'), { code: 'EACCES' });
+    }
+    return originalOpen.call(this, file, ...args);
+  };
+  syncBuiltinESMExports();
+  partial = await HANDLERS.reviewCheckpoint(config, { path: 'untracked-review.txt' }, { workspaceOverride: workspace });
+} finally {
+  fs.openSync = originalOpen;
+  syncBuiltinESMExports();
+}
+assert.equal(attempts, 1, 'omission reporting must not retry the denied read');
+const later = await HANDLERS.reviewReplay(config, { checkpointId: partial.checkpointId }, { workspaceOverride: workspace });
+for (const [value, action, operationName] of [[partial, 'checkpoint', OP.CHANGES_CHECKPOINT], [later, 'replay', OP.CHANGES_REPLAY]]) {
+  const result = serializeConnectorResult({ publicName: 'relai_changes', action, operationName, value });
+  assert.equal(result.diffTruncated, false);
+  assert.equal(result.untrackedReadOmitted, true);
+  assert.ok(result.warning);
+  assert.doesNotMatch(result.warning + result.diff, /private host diagnostic marker|untracked-review\.txt/);
+}
+assert.equal(later.diff, partial.diff, 'replay does not reread content that later became available');
 
 fs.rmSync(root, { recursive: true, force: true });
 console.log('Git workflow smoke test passed.');

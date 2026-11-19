@@ -26,7 +26,7 @@ function createMacManualUpdater(options = {}) {
   if (typeof openPath !== 'function') throw new TypeError('A file opener is required for macOS updates.');
 
   let release = null;
-  let downloadedPath = '';
+  let verifiedDownload = null;
 
   async function checkForUpdates({ channel = 'stable' } = {}) {
     if (channel === 'beta') {
@@ -45,7 +45,7 @@ function createMacManualUpdater(options = {}) {
       });
       release = parseMacMetadata(await boundedText(response, MAX_METADATA_BYTES), arch);
     }
-    downloadedPath = '';
+    verifiedDownload = null;
     return publicRelease(release);
   }
 
@@ -68,7 +68,7 @@ function createMacManualUpdater(options = {}) {
     fs.mkdirSync(updateDirectory, { recursive: true, mode: 0o700 });
 
     if (fs.existsSync(target) && await sha256File(target) === expectedSha256) {
-      downloadedPath = target;
+      verifiedDownload = { path: target, version: requestedVersion, sha256: expectedSha256 };
       const total = fs.statSync(target).size;
       onProgress({ percent: 100, transferred: total, total, bytesPerSecond: 0 });
       onLog(`Reusing verified macOS update ${release.assetName}.`);
@@ -152,7 +152,7 @@ function createMacManualUpdater(options = {}) {
       throw new Error(`Downloaded macOS update failed SHA-256 verification for ${release.assetName}.`);
     }
     fs.renameSync(temporary, target);
-    downloadedPath = target;
+    verifiedDownload = { path: target, version: requestedVersion, sha256: expectedSha256 };
     onProgress({ percent: 100, transferred, total: total || transferred, bytesPerSecond: 0 });
     onLog(`Verified macOS update ${release.assetName}.`);
     return { ...publicRelease(release), assetName: release.assetName };
@@ -169,12 +169,21 @@ function createMacManualUpdater(options = {}) {
 
   async function openDownloaded(version) {
     const requestedVersion = String(version || '').trim();
-    if (!release || release.version !== requestedVersion || !downloadedPath || !fs.existsSync(downloadedPath)) {
+    const proof = verifiedDownload;
+    if (!release || release.version !== requestedVersion || !proof || proof.version !== requestedVersion) {
       throw new Error('The verified macOS update DMG is no longer available. Download it again.');
     }
-    const openError = await openPath(downloadedPath);
+    // The cached file may have changed since download. Use the retained
+    // release checksum so the final verification also works offline.
+    let matches = false;
+    try { matches = await sha256File(proof.path) === proof.sha256; } catch { /* unreadable cache */ }
+    if (!matches || verifiedDownload !== proof) {
+      if (verifiedDownload === proof) verifiedDownload = null;
+      throw new Error('The cached macOS update DMG is no longer verified. Download it again.');
+    }
+    const openError = await openPath(proof.path);
     if (String(openError || '').trim()) throw new Error(`macOS could not open the update DMG: ${String(openError).trim()}`);
-    return { ok: true, assetName: path.basename(downloadedPath) };
+    return { ok: true, assetName: path.basename(proof.path) };
   }
 
   return { checkForUpdates, downloadUpdate, openDownloaded };

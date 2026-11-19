@@ -1,4 +1,4 @@
-import { runProcess, summarizeCommand } from "../process.js";
+import { runProcess, runReadOnlyProcess, summarizeCommand } from "../process.js";
 import { resolveSafePath } from "../safety.js";
 import { literalObservationPaths } from '../repo/gitObservation.js';
 import { gitOperationOptions } from '../repo/gitOps.js';
@@ -24,9 +24,30 @@ function normalizePaths(workspace, paths) {
 
 async function relaiRestorePaths(workspace, config, args = {}, context = {}) {
   const paths = normalizePaths(workspace, args.paths);
-  // ":(literal)" stops git re-interpreting a legitimate filename that happens to
-  // contain pathspec syntax.
-  const restore = await runProcess("git", ["restore", "--", ...paths.map((item) => `:(literal)${item}`)], {
+  // A literal Git pathspec can still select descendants. A deleted directory
+  // is invisible to lstat, so verify the whole selection against the index
+  // before restoring anything. Keep the descendant exclusions on the mutation
+  // as well: a concurrent index change must never broaden the selected scope.
+  const pathspecs = paths.flatMap(file => [`:(literal)${file}`, `:(exclude,literal)${file}/`]);
+  const index = await runReadOnlyProcess("git", ["ls-files", "--stage", "-z", "--", ...pathspecs], {
+    cwd: workspace.path, ...gitOperationOptions(context), preserveOutputWhitespace: true
+  }, config);
+  const exactFiles = new Set();
+  const indexVerified = completeProcess(index) && !index.stdoutTruncated && !index.stdoutSpillTruncated;
+  if (indexVerified) {
+    for (const entry of index.stdout.split("\0")) {
+      // Only ordinary, executable or symbolic-link files at index stage zero.
+      const match = /^(?:100644|100755|120000) [0-9a-f]+ 0\t([\s\S]+)$/u.exec(entry);
+      if (match) exactFiles.add(match[1]);
+    }
+  }
+  if (!paths.every(file => exactFiles.has(file))) {
+    return { workspace: workspace.alias, mode: "paths", paths, ok: false, executed: false,
+      mutationEffect: "none", changedFiles: [],
+      error: indexVerified ? "Restore requires exact tracked file paths in the index. No files were restored."
+        : "Could not verify the Git index. No files were restored. Check repository status before retrying." };
+  }
+  const restore = await runProcess("git", ["restore", "--", ...pathspecs], {
     cwd: workspace.path,
     ...gitOperationOptions(context)
   }, config).catch(error => {
@@ -38,13 +59,13 @@ async function relaiRestorePaths(workspace, config, args = {}, context = {}) {
     mode: "paths",
     paths,
     ...summarizeCommand(restore),
-    ok: completeMutation(restore),
+    ok: completeProcess(restore),
     mutationEffect: restore.executed === false ? "none" : "unknown",
     ...(restore.executed !== false ? { possibleChangedFiles: paths } : {})
   };
 }
 
-function completeMutation(result) {
+function completeProcess(result) {
   return result.executed === true && result.exitCode === 0 && !result.cancelled && !result.timedOut
     && result.terminationConfirmed !== false && !result.outputFinalizationTimedOut;
 }

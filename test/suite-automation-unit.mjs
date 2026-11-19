@@ -463,6 +463,41 @@ async function case_computer_manager_unit() {
     ]
   }, contextA);
   assert.equal(batch.executed, true);
+
+  // The helper can die after native input was sent. Preserve this receipt even
+  // when the caller signal is now aborted and subsequent steps must be skipped.
+  {
+    const controller = new AbortController();
+    let sends = 0;
+    const fake = { ...semanticAdapter, activate: async () => {
+      sends++;
+      controller.abort(new Error('fixture cancellation after native dispatch'));
+      throw Object.assign(new Error('Native input may already have taken effect. ' + 'x'.repeat(3000)), {
+        outcomeUnknown: true, terminationConfirmed: true
+      });
+    } };
+    const context = { ...contextA, semanticAdapter: fake, signal: controller.signal };
+    const observed = await runComputerAction(workspace, enabledConfig, { action: 'observe', app: APP }, context);
+    const receipt = await runComputerAction(workspace, enabledConfig, { action: 'batch', app: APP,
+      semanticObservationId: observed.semanticObservationId,
+      actions: [{ action: 'displays' }, { action: 'activate', targetId: semanticTarget.targetId }, { action: 'activate', targetId: semanticTarget.targetId }]
+    }, context);
+    assert.equal(sends, 1, 'an unacknowledged action must not be replayed');
+    assert.equal(receipt.ok, false);
+    assert.equal(receipt.mutationUnknown, true);
+    assert.equal(receipt.executed, undefined);
+    assert.equal(receipt.results[0].ok, true, 'keep the first confirmed result');
+    assert.equal(receipt.results[1].mutationUnknown, true);
+    assert.equal(receipt.results[1].executed, undefined);
+    assert.equal(receipt.results[1].terminationConfirmed, true);
+    assert.equal(receipt.results[2].skipped, true);
+    assert.equal(receipt.results[2].executed, false);
+    const { toolResult } = await import('../src/mcp/results.js');
+    const compact = toolResult(receipt, true, undefined, { maxResponseBytes: 2048 });
+    assert.equal(compact.structuredContent.truncated, true);
+    assert.equal(compact.structuredContent.mutationUnknown, true, 'minimum-size MCP receipts must preserve the uncertainty even if per-step detail is omitted');
+    assert.ok(Buffer.byteLength(JSON.stringify(compact)) <= 2048);
+  }
   assert.deepEqual(calls, [
     ['move', undefined, { x: 5, y: 6 }],
     ['click', undefined, { x: 7, y: 8 }]
@@ -514,8 +549,56 @@ async function case_computer_manager_unit() {
   );
   queuedController.abort();
   await assert.rejects(cancelledQueuedClick, error => error?.name === 'AbortError');
+  // A session-level stop fences older queued work and reads without stopping
+  // the shared native reader for an independently authorized conversation.
+  const startedRead = Promise.withResolvers(), bothReading = Promise.withResolvers(), finishRead = Promise.withResolvers();
+  let readers = 0;
+  const readAdapter = { ...semanticAdapter, observe: async (...args) => {
+    if (++readers === 1) startedRead.resolve(); else bothReading.resolve();
+    // The real native helper is shared: killing it would reject both observers.
+    args[3]?.addEventListener('abort', () => finishRead.reject(new Error('shared helper terminated')), { once: true });
+    await finishRead.promise;
+    return semanticAdapter.observe(...args);
+  } };
+  const read = args => runComputerAction(workspace, enabledConfig, { action: 'observe', app: APP }, args);
+  const independentRead = read({ ...contextB, semanticAdapter: readAdapter });
+  await startedRead.promise;
+  const stoppedRead = read({ ...contextA, semanticAdapter: readAdapter }).then(
+    value => ({ value }), error => ({ error }));
+  await bothReading.promise;
+  const staleQueued = runComputerAction(workspace, enabledConfig, { action: 'click', app: APP, x: 3, y: 3 }, blockingContextA)
+    .then(value => ({ value }), error => ({ error }));
+  const ownerStop = await runComputerAction(workspace, enabledConfig, { action: 'stop' }, contextA);
+  assert.equal(ownerStop.released, true);
+  assert.match(ownerStop.message, /already sent to an app may still finish/);
   releaseBlockedClick();
-  await firstQueuedClick;
+  finishRead.resolve();
+  assert.equal((await firstQueuedClick).executed, true, 'a confirmed, already-sent input is not rolled back');
+  assert.equal((await staleQueued).error?.name, 'AbortError', 'stop must reject an older same-session queued input');
+  assert.equal((await stoppedRead).error?.name, 'AbortError', 'an older read must not repopulate retired observation state');
+  assert.equal((await independentRead).semanticAvailable, true);
+  assert.equal((await runComputerAction(workspace, enabledConfig, { action: 'status' }, contextA)).controlling, false);
+  assert.equal((await read({ ...contextA, semanticAdapter })).semanticAvailable, true, 'new commands use a fresh session generation');
+
+  // Stop also fences a call awaiting initial target resolution before any lock existed.
+  {
+    const resolving = Promise.withResolvers(), finish = Promise.withResolvers();
+    let captures = 0;
+    const paused = { ...contextA, computerAdapter: { ...adapter, async screenshotApp() { captures++; throw Error('no fixture pixels'); } },
+      semanticAdapter: { ...semanticAdapter, supported: () => true, resolveAppTarget: async () => {
+        resolving.resolve(); await finish.promise;
+        return { canonicalApp: APP, requestedApp: APP, approvalBasis: 'executable', policyNames: [APP] };
+      } }
+    };
+    const waiting = runComputerAction(workspace, enabledConfig, { action: 'wait_for_change', app: APP }, paused)
+      .then(value => ({ value }), error => ({ error }));
+    await resolving.promise;
+    assert.equal((await runComputerAction(workspace, enabledConfig, { action: 'stop' }, contextA)).released, false);
+    finish.resolve();
+    assert.equal((await waiting).error?.name, 'AbortError');
+    assert.equal(captures, 0, 'late target resolution must not reacquire the lock or start a capture');
+    assert.equal((await runComputerAction(workspace, enabledConfig, { action: 'status' }, contextA)).controlling, false);
+  }
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(queuedCalls, [['click', undefined, { x: 1, y: 1 }]], 'cancelled queued input must never execute later');
   

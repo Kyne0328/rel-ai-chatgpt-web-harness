@@ -12,7 +12,7 @@ import { toolResult } from "../src/mcp/results.js";
 import { invokeRelaiTool } from '../src/mcp/toolInvocation.js';
 import { validateToolOutput } from '../src/tools/outputValidation.js';
 import { readSessionPolicy } from "../src/policyResolver.js";
-import { readTaskIntegrity } from '../src/taskIntegrity.ts';
+import { readTaskIntegrity, recordTaskIntegrityEvent } from '../src/taskIntegrity.ts';
 import { taskEphemeralDirectory } from '../src/taskEphemeral.ts';
 import { withStateDatabase } from '../src/stateDatabase.ts';
 import assert from 'node:assert/strict';
@@ -260,6 +260,18 @@ try {
   assert.equal(fs.existsSync(path.join(workspace, scratchPath)), true);
   assert.equal(fs.existsSync(path.join(scratchDirectory, 'outside.tmp')), true);
   assert.deepEqual(readTaskIntegrity(readConfig(), scratchTask, 'app').ephemeralWorkspaceFiles.map(item => item.path), [scratchPath]);
+  const scratchCheckpoint = await callTool('relai_changes', {
+    action: 'checkpoint', workspace: 'app', work_id: scratchTask
+  }, { publicHttpOnly: true });
+  assert.equal(scratchCheckpoint.ok, true);
+  assert.ok(!(scratchCheckpoint.reviewedFiles || []).includes(scratchPath));
+  assert.doesNotMatch(scratchCheckpoint.diff || '', /workspace scratch/);
+  const savedScratchReview = await callTool('relai_changes', {
+    action: 'replay', workspace: 'app', checkpointId: scratchCheckpoint.checkpointId
+  }, { publicHttpOnly: true });
+  assert.equal(savedScratchReview.ok, true);
+  assert.ok(!(savedScratchReview.reviewedFiles || []).includes(scratchPath));
+  assert.doesNotMatch(savedScratchReview.diff || '', /workspace scratch/);
   const scratchHasRedirectedAncestor = path.resolve(fs.realpathSync(scratchDirectory)) !== path.resolve(scratchDirectory);
   const scratchCompletion = await callTool('relai_work', {
     action: 'finish', workspace: 'app', work_id: scratchTask,
@@ -289,6 +301,10 @@ try {
     ephemeralPaths: [preservedScratchPath]
   }, { publicHttpOnly: true });
   fs.writeFileSync(path.join(workspace, preservedScratchPath), 'changed after declaration\n');
+  const changedScratchReview = await callTool('relai_changes', {
+    action: 'diff', workspace: 'app', work_id: preservedScratchTask
+  }, { publicHttpOnly: true });
+  assert.ok(changedScratchReview.reviewedFiles.includes(preservedScratchPath), 'changed bytes no longer qualify as verified scratch');
   const preservedScratchCompletion = await callTool('relai_work', {
     action: 'finish', workspace: 'app', work_id: preservedScratchTask,
     summary: 'Changed scratch is preserved instead of deleted.'
@@ -602,6 +618,36 @@ try {
   assert.equal(recoveredCompletion.work_id, restartTaskId);
 
   resetToolActivity();
+
+  // Recovered ownership can contain many removed paths. Seed that prior work
+  // directly: the exercise here is the real check -> durable authority -> finish.
+  const largeScope = Array.from({ length: 1001 }, (_, i) => 'removed-' + String(i).padStart(4, '0') + '.txt');
+  for (const changed of [false, true]) {
+    const largeTask = await startTask('large-validation-scope-' + changed);
+    await recordTaskIntegrityEvent(readConfig(), { taskIdentityVersion: 2, taskId: largeTask, workspace: 'app',
+      tool: 'exec', ok: true, mutationEffect: 'applied', changedFiles: largeScope });
+    const check = await callTool('relai_validate', { action: 'checks', workspace: 'app', work_id: largeTask,
+      check: 'node --check src/index.js' }, { publicHttpOnly: true });
+    assert.equal(check.validationStatus, 'passed');
+    await flushTaskHistoryPersistence();
+    resetToolActivity();
+    resetTaskHistoryCaches();
+    const lastPath = path.join(workspace, largeScope.at(-1));
+    if (changed) fs.writeFileSync(lastPath, 'a removed input came back');
+    try {
+      const completed = await callTool('relai_work', { action: 'finish', workspace: 'app', work_id: largeTask,
+        summary: 'Compare the complete persisted input set.' }, { publicHttpOnly: true });
+      assert.equal(completed.validationStatus, changed ? 'stale' : 'passed',
+        'diagnostic display limits must not alter factual freshness after recovery');
+      const fullScope = readTaskIntegrity(readConfig(), largeTask, 'app').validationScope;
+      assert.ok(fullScope.includes(largeScope.at(-1)));
+      await flushAuditWrites();
+      const checkAudit = readAudit(readConfig(), { taskId: largeTask, fullScan: true }).entries.find(event => event.tool === 'validate.checks');
+      assert.ok(checkAudit.validationScope.length < fullScope.length, 'diagnostic scope should remain bounded separately');
+    } finally {
+      if (changed) fs.rmSync(lastPath, { force: true });
+    }
+  }
   const longAuditTaskId = await startTask('completion-after-long-audit-tail');
   await callTool('relai_edit', {
     workspace: 'app',

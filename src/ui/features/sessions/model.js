@@ -54,6 +54,32 @@ export function sessionIdentifier(session = {}) {
   return String(session.id || session.taskId || session.work_id || '').trim();
 }
 
+// Only use the receipt-backed link published by Goal Mode for this exact task.
+export function linkedChatgptUrl(session = {}) {
+  const goal = session.goalMode;
+  const link = goal?.chatLink;
+  const id = goal?.conversationId;
+  if (!goal?.work_id || goal.work_id !== sessionIdentifier(session) || link?.state !== 'linked'
+    || link.version !== 1 || !Number.isSafeInteger(link.verifiedAt) || link.verifiedAt <= 0
+    || typeof id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) return '';
+  const canonical = 'https://chatgpt.com/c/' + id;
+  return link.conversationUrl === canonical ? canonical : '';
+}
+
+// The user chooses where to paste. Never copy task text, file paths or tool output.
+export function formatTaskHandoffBrief(session = {}) {
+  const id = sessionIdentifier(session);
+  const steps = Array.isArray(session.plan?.steps) ? session.plan.steps : [];
+  const resolved = steps.filter(step => step?.status === 'completed' || step?.status === 'skipped').length;
+  return [
+    'Rel.AI task handoff',
+    'Work ID: ' + (/^[A-Za-z0-9_-]{1,128}$/.test(id) ? id : 'Not recorded'),
+    'Status: ' + workSessionStateView(session).label,
+    'Plan: ' + (steps.length ? resolved + '/' + steps.length + ' steps resolved' : 'Not recorded'),
+    'Recorded validation: ' + taskValidationView(session).statusLabel
+  ].join('\n');
+}
+
 export function taskControlMessage(action, result = {}) {
   if (action === 'goal_stop') return 'Goal stopped. The task is unchanged.';
   if (action === 'cancel') {
@@ -85,19 +111,27 @@ export function taskRowActivity(session = {}, semantic = semanticProgressFor(ses
   return String(semantic.currentActivity || semantic.currentStage || session.currentActivity || session.currentStage || 'Waiting for work').trim();
 }
 
+export function recordedValidationStatus(session = {}) {
+  return session.validation || session.validationPlan?.status || session.validationStatus || '';
+}
+
 export function taskValidationView(session = {}) {
   const events = (Array.isArray(session.events) ? session.events : []).filter(event =>
     event.operation === 'checks' || event.tool?.operation === 'checks'
     || (event.tool?.name || event.tool) === 'relai_validate' || event.validation || event.title === 'Validation');
-  const explicit = session.validation || session.validationPlan?.status || session.validationStatus || '';
-  const isValidationFailed = explicit === 'failed' || session.status === 'validation_failed';
+  const explicit = recordedValidationStatus(session);
+  // The task may be marked validation_failed because the checked inputs changed.
+  // Prefer the recorded reason to that coarse task status.
+  const recordedReason = explicit === 'stale' ? 'Out of date; recheck'
+    : explicit === 'cancelled' ? 'Cancelled' : explicit === 'not_required' ? 'Not required' : '';
+  const isValidationFailed = explicit === 'failed' || (!recordedReason && session.status === 'validation_failed');
   const isValidationPassed = explicit === 'passed';
   const isValidationNotRun = explicit === 'not_run';
   const checking = isOngoingSession(session) && (session.status === 'validating'
     || events.some(event => event.status === 'running' || event.active));
-  const statusLabel = checking ? 'Checking' : isValidationFailed ? 'Failed' : isValidationPassed ? 'Passed'
-    : isValidationNotRun ? 'Not run' : explicit === 'unavailable' ? 'Unavailable' : 'Not recorded';
-  const tone = checking ? 'working' : isValidationFailed ? 'bad' : isValidationPassed ? 'good' : 'neutral';
+  const statusLabel = checking ? 'Checking' : recordedReason || (isValidationFailed ? 'Failed' : isValidationPassed ? 'Passed'
+    : isValidationNotRun ? 'Not run' : explicit === 'unavailable' ? 'Unavailable' : 'Not recorded');
+  const tone = checking ? 'working' : isValidationFailed ? 'bad' : isValidationPassed ? 'good' : explicit === 'stale' ? 'warn' : 'neutral';
   return { events, statusLabel, tone, checking, isValidationFailed, isValidationPassed, isValidationNotRun };
 }
 
@@ -166,7 +200,7 @@ export function sessionDescription(session = {}, live = isOngoingSession(session
 }
 
 export function sessionNeedsAttention(session = {}) {
-  if (workSessionStateView(session).status === 'completed') return false;
+  if (workSessionStateView(session).status === 'completed') return recordedValidationStatus(session) === 'stale';
   return session.validation === 'failed'
     || ['failed', 'validation_failed', 'blocked'].includes(String(session.status || ''));
 }

@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { openStateDatabase } from '../src/stateDatabase.ts';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -32,6 +34,43 @@ const context = {
 const callTool = (name, args) => rawCallTool(name, args, context);
 
 try {
+
+  // Each client exits immediately after its public response, without flushing
+  // the service's deferred activity queue. The next client uses only SQLite.
+  const planClient = path.join(sandbox, 'plan-client.mjs');
+  fs.writeFileSync(planClient, `
+    import { callTool } from ${JSON.stringify(new URL('../src/tools.js', import.meta.url).href)};
+    const args = JSON.parse(process.argv[2]);
+    try {
+      const result = await callTool('relai_work', { workspace: 'repo', ...args }, { principal: 'local:trusted', publicHttpOnly: true });
+      console.log(JSON.stringify({ ok: result.ok, id: result.work_id, plan: result.plan || result.task?.plan, message: result.message, code: result.errorCode }));
+    } catch (error) { console.log(JSON.stringify({ ok: false, code: error.code })); }
+    process.exit(0);
+  `);
+  const fresh = args => JSON.parse(execFileSync(process.execPath, [planClient, JSON.stringify(args)],
+    { encoding: 'utf8', timeout: 15000 }).trim());
+  const initialSteps = [{ id: 'inspect', title: 'Inspect crash boundary', status: 'pending' }];
+  const updatedSteps = [{ ...initialSteps[0], status: 'completed' }];
+  const created = fresh({ action: 'begin', title: 'Crash boundary fixture', bootstrap: 'none', steps: initialSteps });
+  assert.equal(created.plan.revision, 1);
+  assert.deepEqual(fresh({ action: 'status', work_id: created.id }).plan, created.plan,
+    'begin must recover its acknowledged initial plan in a new process');
+  const planArgs = { action: 'plan', work_id: created.id, steps: updatedSteps };
+  const db = openStateDatabase(config);
+  try {
+    db.exec("CREATE TRIGGER reject_new_plan BEFORE UPDATE ON task_history WHEN json_extract(NEW.payload,'$.plan.revision') > 1 BEGIN SELECT RAISE(ABORT,'fixture failed plan update'); END");
+    assert.equal(fresh(planArgs).ok, false, 'a refused durable update cannot be reported as successful');
+    assert.deepEqual(fresh({ action: 'status', work_id: created.id }).plan, created.plan);
+    db.exec('DROP TRIGGER reject_new_plan');
+    const saved = fresh(planArgs);
+    assert.equal(saved.plan.revision, 2);
+    assert.deepEqual(fresh({ action: 'status', work_id: created.id }).plan, saved.plan,
+      'plan replacement must survive immediate exit without a graceful flush');
+    const retry = fresh(planArgs);
+    assert.deepEqual(retry.plan, saved.plan, 'retrying a recovered terminal step must not advance its revision');
+    assert.equal(retry.message, 'Task plan is unchanged.');
+  } finally { db.close(); }
+
   resetToolActivity();
 
   const started = await callTool('relai_work', { mode: 'normal',

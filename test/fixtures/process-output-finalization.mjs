@@ -142,10 +142,13 @@ export async function verifyRunProcessSpillFinalization(runProcess) {
   };
   syncBuiltinESMExports();
   try {
+    // Windows replays native-job logs with a 1 MiB spill low watermark. Cross it
+    // so a held write exercises durable draining, not just spill.finish().
+    const outputBytes = process.platform === 'win32' ? 2 * 1024 * 1024 : 20000;
     const result = await Promise.race([
       runWithMutationProcessOwnership(config, 'completed-child', () => runProcess(
         process.execPath,
-        ['-e', "process.stdout.write('o'.repeat(20000) + '\\nSTDOUT-END\\n'); process.exitCode = 7;"],
+        ['-e', `process.stdout.write('o'.repeat(${outputBytes}) + '\\nSTDOUT-END\\n'); process.exitCode = 7;`],
         {
           cwd: root, outputSpillTaskId: 'owner', maxOutputBytes: 1000,
           resourceClass: 'heavy', resourceOwner: 'finalization-fixture',

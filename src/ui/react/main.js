@@ -16,7 +16,7 @@ import { createRoot } from 'react-dom/client';
 import * as AlertDialog from '@radix-ui/react-alert-dialog';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Icon } from '../components/icons.js';
-import { OverlayFrame } from '../components/overlay-frame.js';
+import { OverlayFrame, restoreOverlayFocus } from '../components/overlay-frame.js';
 import { classifyTaskActivity } from '../../taskActivityPresentation.js';
 import { toast } from '../components/toast.js';
 import { StatusPill } from '../components/pill.js';
@@ -902,11 +902,7 @@ function CommandPalette({ data, desktop, extensionsEnabled, developerOptionsUnlo
         event.preventDefault();
         queueMicrotask(() => inputRef.current?.focus({ preventScroll: true }));
       },
-      onCloseAutoFocus: event => {
-        event.preventDefault();
-        if (opener instanceof HTMLElement && opener.isConnected) opener.focus({ preventScroll: true });
-        else document.getElementById('pageTitle')?.focus({ preventScroll: true });
-      }
+      onCloseAutoFocus: event => restoreOverlayFocus(event, opener)
     }
   },
     h('header', { className: 'modal-head' },
@@ -1146,11 +1142,7 @@ const ModalPortal = memo(function ModalPortal({ descriptor }) {
       onPointerDownOutside: event => {
         if (descriptor.confirmation || !descriptor.dismissEnabled) event.preventDefault();
       },
-      onCloseAutoFocus: event => {
-        event.preventDefault();
-        if (descriptor.opener instanceof HTMLElement && descriptor.opener.isConnected) descriptor.opener.focus({ preventScroll: true });
-        else document.getElementById('pageTitle')?.focus({ preventScroll: true });
-      }
+      onCloseAutoFocus: event => restoreOverlayFocus(event, descriptor.opener)
     }
   },
     h('header', { className: 'modal-head', inert: descriptor.confirmation ? true : undefined },
@@ -1244,11 +1236,7 @@ const DrawerPortal = memo(function DrawerPortal({ descriptor }) {
     backdropProps: { id: '__relai-drawer-backdrop', 'data-react-overlay': 'drawer' },
     contentProps: {
       'aria-describedby': descriptor.description ? '__relai-drawer-desc' : undefined,
-      onCloseAutoFocus: event => {
-        event.preventDefault();
-        if (descriptor.opener instanceof HTMLElement && descriptor.opener.isConnected) descriptor.opener.focus({ preventScroll: true });
-        else document.getElementById('pageTitle')?.focus({ preventScroll: true });
-      }
+      onCloseAutoFocus: event => restoreOverlayFocus(event, descriptor.opener)
     }
   },
     h('div', { className: 'drawer-head' },

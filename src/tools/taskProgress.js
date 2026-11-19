@@ -1,7 +1,22 @@
 import { getToolActivity, updateCurrentToolActivity } from '../toolActivity.js';
 import { normalizeTaskPlan } from '../taskObservability.js';
+import { recordTaskActivityEvent, withTaskHistoryPersistenceBarrier } from '../taskHistoryStore.ts';
 
-function applyTaskProgressPatch(taskId, patch = {}, update = updateCurrentToolActivity) {
+async function applyTaskProgressPatch(config, taskId, patch = {}, update = updateCurrentToolActivity, options = {}) {
+  try {
+    return await withTaskHistoryPersistenceBarrier(config, taskId, () => commitTaskProgressPatch(config, taskId, patch, update), options);
+  } catch (error) {
+    if (error?.code === 'FALLBACK_PERSISTENCE_FAILED') throw planPersistenceError(error);
+    throw error;
+  }
+}
+
+function planPersistenceError(cause) {
+  return Object.assign(new Error('The task plan could not be saved. Retry the same plan after task storage is available.', { cause }),
+    { code: 'TASK_PLAN_PERSISTENCE_FAILED', retryable: true });
+}
+
+function commitTaskProgressPatch(config, taskId, patch, update) {
   const id = String(taskId || '').trim();
   if (!id || !patch || typeof patch !== 'object' || Array.isArray(patch)) return null;
 
@@ -33,7 +48,15 @@ function applyTaskProgressPatch(taskId, patch = {}, update = updateCurrentToolAc
 
   const changed = JSON.stringify(currentPlan.steps || []) !== JSON.stringify(candidate.steps || []);
   const plan = changed ? { ...candidate, revision: currentRevision + 1 } : currentPlan;
-  if (changed) update?.({ plan });
+  if (changed) {
+    // Publish only after the exact revision is on disk. The barrier prevents
+    // an already posted activity writer from replacing this snapshot later.
+    try {
+      const stored = recordTaskActivityEvent(config, { task: { ...currentTask, id, plan } });
+      if (JSON.stringify(stored?.plan) !== JSON.stringify(plan)) throw new Error('Plan revision was not recorded.');
+    } catch (error) { throw planPersistenceError(error); }
+    update?.({ plan });
+  }
 
   const resolved = plan.steps.filter(step => ['completed', 'skipped'].includes(String(step?.status || ''))).length;
   const active = plan.steps.find(step => String(step?.status || '') === 'in_progress') || null;

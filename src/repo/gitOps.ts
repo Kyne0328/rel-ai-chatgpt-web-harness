@@ -356,22 +356,26 @@ async function gitRefExists(workspace: RepoWorkspace, config: RepoConfig, ref: s
   return result.exitCode === 0;
 }
 
-async function detectDefaultBaseBranch(workspace: RepoWorkspace, config: RepoConfig): Promise<string> {
+async function detectDefaultBaseBranch(workspace: RepoWorkspace, config: RepoConfig) {
   const remotes = await runReadOnlyProcess("git", ["remote"], { cwd: workspace.path, timeout: 30000 }, config);
   if (remotes.exitCode === 0) {
     const names = configuredRemoteNames(remotes.stdout).filter((name) => /^[A-Za-z0-9._/-]{1,200}$/.test(name) && !name.startsWith("-") && !name.includes(".."));
     names.sort((left, right) => Number(right === "origin") - Number(left === "origin") || left.localeCompare(right));
     for (const remote of names) {
-      const symbolic = await runReadOnlyProcess("git", ["symbolic-ref", "--quiet", "--short", `refs/remotes/${remote}/HEAD`], { cwd: workspace.path, timeout: 30000 }, config);
+      const symbolic = await runReadOnlyProcess("git", ["symbolic-ref", "--quiet", `refs/remotes/${remote}/HEAD`], { cwd: workspace.path, timeout: 30000 }, config);
       const value = String(symbolic.stdout || "").trim();
-      const prefix = `${remote}/`;
-      if (symbolic.exitCode === 0 && value.startsWith(prefix) && value.length > prefix.length) return value.slice(prefix.length);
+      const prefix = `refs/remotes/${remote}/`;
+      if (completeGitCommand(symbolic) && !symbolic.stdoutTruncated && !symbolic.stdoutSpillTruncated && value.startsWith(prefix) && value.length > prefix.length) {
+        return { label: value.slice(prefix.length), revision: value, tracking: true };
+      }
     }
   }
   for (const candidate of ["main", "master"]) {
-    if (await gitRefExists(workspace, config, `refs/heads/${candidate}`)) return candidate;
+    const revision = `refs/heads/${candidate}`;
+    if (await gitRefExists(workspace, config, revision)) return { label: candidate, revision, tracking: false };
   }
-  return currentGitBranch(workspace, config);
+  const branch = await currentGitBranch(workspace, config);
+  return { label: branch, revision: branch, tracking: false };
 }
 
 async function currentGitBranch(workspace: RepoWorkspace, config: RepoConfig, context: RepoArgs = {}): Promise<string> {
@@ -816,10 +820,14 @@ async function relaiGitPush(workspace: RepoWorkspace, config: RepoConfig, args: 
 async function relaiGitDraftPr(workspace: RepoWorkspace, config: RepoConfig, args: RepoArgs = {}) {
   await ensureGitRepo(workspace, config);
   const head = String(args.head || await currentGitBranch(workspace, config)).trim();
-  const base = String(args.base || await detectDefaultBaseBranch(workspace, config)).trim();
+  const autoBase = args.base ? null : await detectDefaultBaseBranch(workspace, config);
+  const base = String(args.base || autoBase?.label || '').trim();
+  const baseRevision = autoBase?.revision || base;
+  const baseWarning = autoBase && !autoBase.tracking
+    ? 'No cached remote default branch was identified; using the local base only. No remote was contacted.' : '';
   const title = String(args.title || "").trim();
   const body = String(args.body || "").trim();
-  const revisions = await runReadOnlyProcess("git", ["rev-parse", "--revs-only", "--end-of-options", `${base}^{commit}`, `${head}^{commit}`], {
+  const revisions = await runReadOnlyProcess("git", ["rev-parse", "--revs-only", "--end-of-options", `${baseRevision}^{commit}`, `${head}^{commit}`], {
     cwd: workspace.path, timeout: 30000, maxOutputBytes: 4096
   }, config);
   const commits = String(revisions.stdout || "").trim().split(/\r?\n/);
@@ -829,7 +837,10 @@ async function relaiGitDraftPr(workspace: RepoWorkspace, config: RepoConfig, arg
       ok: false, workspace: workspace.alias, base, head,
       title: title || `Merge ${head} into ${base}`, body,
       changedFiles: [], changedFileCount: 0, emptyDiff: false, draftOnly: true, remoteChanged: false,
-      error: 'Could not resolve both pull request references to commits.',
+      error: autoBase?.tracking && !await gitRefExists(workspace, config, `${baseRevision}^{commit}`)
+        ? `No cached commit for the remote default branch ${baseRevision}. No remote was contacted; refresh tracking refs or specify a base.`
+        : 'Could not resolve both pull request references to commits.',
+      ...(baseWarning ? { warning: baseWarning } : {}),
       revisions: summarizeCommand(revisions)
     };
   }
@@ -856,7 +867,7 @@ async function relaiGitDraftPr(workspace: RepoWorkspace, config: RepoConfig, arg
     emptyDiff,
     draftOnly: true,
     remoteChanged: false,
-    ...(emptyDiff ? { warning: `No diff between ${base} and ${head}; refusing to draft an empty pull request.` } : {}),
+    ...(emptyDiff || baseWarning ? { warning: [baseWarning, emptyDiff ? `No diff between ${base} and ${head}; refusing to draft an empty pull request.` : ''].filter(Boolean).join(' ') } : {}),
     diff: summarizeCommand(diff),
     ...(!filesComplete ? { error: 'Could not read the complete changed-file list.', fileList: summarizeCommand(fileList) } : {})
   };

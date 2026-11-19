@@ -975,7 +975,7 @@ async function case_release_distribution_unit() {
     const { assertInstalledElectronDependencies } = __m6;
   
     const __m7 = await import("../scripts/release-artifacts.mjs");
-    const { platformReleaseArtifactNames, releaseArtifactNames } = __m7;
+    const { assertPromotableCandidate, platformReleaseArtifactNames, releaseArtifactNames } = __m7;
   
     const __m8 = await import("../scripts/generate-sbom.mjs");
     const { appendNativeReleaseComponents, nativeReleaseComponents } = __m8;
@@ -995,6 +995,26 @@ async function case_release_distribution_unit() {
   verifyReleaseMetadataSynchronization();
   verifyReleaseWorkflowPreflight();
   verifyArtifactResolution();
+  // Use the four native packaging plans and combined metadata as the oracle,
+  // rather than repeating the preflight's own list.
+  const version = '9.8.7';
+  const names = releaseArtifactNames(version);
+  const assets = [
+    ...platformReleaseArtifactNames(version, 'win32'),
+    ...platformReleaseArtifactNames(version, 'linux'),
+    ...platformReleaseArtifactNames(version, 'darwin', 'x64'),
+    ...platformReleaseArtifactNames(version, 'darwin', 'arm64'),
+    names.macMetadata, names.checksums
+  ].map(name => ({ name, size: 16, state: 'uploaded' }));
+  const candidate = { tagName: version, isDraft: false, isPrerelease: true, assets };
+  assert.doesNotThrow(() => assertPromotableCandidate(version, candidate));
+  for (const asset of assets) {
+    for (const changed of [[], [{ ...asset, size: 0 }], [{ ...asset, state: 'starter' }], [asset, asset]]) {
+      assert.throws(() => assertPromotableCandidate(version, {
+        ...candidate, assets: [...assets.filter(entry => entry !== asset), ...changed]
+      }), /requires one non-empty uploaded asset/);
+    }
+  }
   verifyNativeSbomCoverage();
   // The assembled graph must retain distinct versions and reconnect original
   // npm references to version-qualified identities across independent installs.
@@ -1275,6 +1295,35 @@ async function case_release_distribution_unit() {
     assert.equal(previous?.version, '1.9.0');
     assert.equal(previous?.asset?.browser_download_url, 'previous');
   
+    const preview = { tag_name: '2.0.0-rc.1', draft: false, prerelease: true, assets: [] };
+    const release = version => ({ tag_name: version, draft: false, prerelease: false,
+      assets: [{ name: `Setup-${version}.exe`, browser_download_url: 'fixture-never-downloaded' }] });
+    const checked = [];
+    const options = { repository: 'fixture/repo', currentVersion: '2.0.0', apiBase: 'https://api.release.invalid',
+      assetNameForVersion: version => `Setup-${version}.exe` };
+    const page = (list, next = false) => new Response(JSON.stringify(list), { headers: next
+      ? { Link: '<https://other.invalid/untrusted-location>; rel="next"' } : {} });
+    const history = await findPreviousReleaseAsset({ ...options, fetchImpl: async value => {
+      const url = new URL(value);
+      assert.equal(url.origin, options.apiBase);
+      assert.equal(url.pathname, '/repos/fixture/repo/releases');
+      const number = Number(url.searchParams.get('page'));
+      checked.push(number);
+      if (number === 1) return page(Array(50).fill(preview), true);
+      if (number === 2) return page([release('1.4.0')], true);
+      assert.equal(number, 3);
+      return page([release('1.9.0'), release('2.0.0'), { ...release('1.9.1'), draft: true }]);
+    } });
+    assert.deepEqual(checked, [1, 2, 3]);
+    assert.equal(history.version, '1.9.0', 'select the greatest eligible stable version across pages');
+    assert.equal(await findPreviousReleaseAsset({ ...options, fetchImpl: async () => page([preview]) }), null,
+      'a complete preview-only history permits a first stable install');
+    let calls = 0;
+    await assert.rejects(() => findPreviousReleaseAsset({ ...options, fetchImpl: async () => ++calls === 1
+      ? page([release('1.5.0')], true) : new Response('unavailable', { status: 503 }) }), /HTTP 503/);
+    await assert.rejects(() => findPreviousReleaseAsset({ ...options, fetchImpl: async () => page({}) }), /malformed/);
+    await assert.rejects(() => findPreviousReleaseAsset({ ...options, fetchImpl: async () => page([preview], true) }), /incomplete/);
+
     const bytes = Buffer.from('release-asset');
     const digest = `sha256:${crypto.createHash('sha256').update(bytes).digest('hex')}`;
     verifyDownloadedAssetBytes(bytes, { name: 'artifact.exe', size: bytes.length, digest });
@@ -1681,25 +1730,27 @@ async function case_updater_artifact_contract_unit() {
     const path = __m4.default;
   
     const __m5 = await import("../scripts/release-artifacts.mjs");
-    const { invalidateDerivedReleaseEvidence, releaseArtifactNames } = __m5;
+    const { invalidateDerivedReleaseEvidence, parseLatestMetadata, releaseArtifactNames } = __m5;
   
     const __m6 = await import("../scripts/verify-updater-artifacts.mjs");
     const { verifyPlatformUpdaterArtifacts, verifyUpdaterArtifacts } = __m6;
   
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-updater-contract-'));
-  const installer = 'Rel.AI-MCP-Setup-9.8.7.exe';
+  const packageJson = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+  const canonicalNames = releaseArtifactNames(packageJson.version);
+  const installer = canonicalNames.installer;
   const metadata = 'latest.yml';
   const checksums = 'SHA256SUMS.txt';
   const list = path.join(root, 'release-assets.txt');
   const bytes = Buffer.from('canonical installer bytes');
   
-  function writeFixture({ listedInstaller = installer, metadataInstaller = installer, sha512Bytes = bytes, includeBlockmap = true, includeChecksum = true } = {}) {
+  function writeFixture({ listedInstaller = installer, metadataInstaller = installer, sha512Bytes = bytes, includeBlockmap = true, includeChecksum = true, version = packageJson.version } = {}) {
     fs.rmSync(root, { recursive: true, force: true });
     fs.mkdirSync(root, { recursive: true });
     fs.writeFileSync(path.join(root, listedInstaller), bytes);
     if (includeBlockmap) fs.writeFileSync(path.join(root, `${listedInstaller}.blockmap`), 'blockmap');
     const sha512 = crypto.createHash('sha512').update(sha512Bytes).digest('base64');
-    fs.writeFileSync(path.join(root, metadata), `version: 9.8.7\nfiles:\n  - url: ${metadataInstaller}\n    sha512: ${sha512}\n    size: ${bytes.length}\npath: ${metadataInstaller}\nsha512: ${sha512}\n`);
+    fs.writeFileSync(path.join(root, metadata), `version: ${version}\nfiles:\n  - url: ${metadataInstaller}\n    sha512: ${sha512}\n    size: ${bytes.length}\npath: ${metadataInstaller}\nsha512: ${sha512}\n`);
     const sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
     fs.writeFileSync(path.join(root, checksums), includeChecksum ? `${sha256}  ${listedInstaller}\n` : '');
     fs.writeFileSync(list, [listedInstaller, `${listedInstaller}.blockmap`, metadata, checksums].join('\n'));
@@ -1725,8 +1776,17 @@ async function case_updater_artifact_contract_unit() {
     writeFixture({ includeChecksum: false });
     assert.throws(() => verifyUpdaterArtifacts(options), /does not include/);
   
-    const packageJson = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-    const canonicalNames = releaseArtifactNames(packageJson.version);
+    // A feed with matching bytes and exact payload names can still tell clients
+    // that an older version is current. Both the aggregate and platform gates reject it.
+    writeFixture({ version: '0.0.0-stale-fixture' });
+    assert.throws(() => verifyUpdaterArtifacts(options), /release version matching/);
+    assert.throws(() => verifyPlatformUpdaterArtifacts({ directory: root, platform: 'win32' }), /release version matching/);
+    const body = fs.readFileSync(path.join(root, metadata), 'utf8').split('\n').slice(1).join('\n');
+    const candidate = '9.8.7-rc.1';
+    assert.deepEqual(parseLatestMetadata(`version: "${candidate}"\n${body}`, candidate).map(file => file.basename), [installer]);
+    for (const header of ['', 'version: 9.8.7\n', `version: ${candidate}\nversion: ${candidate}\n`]) {
+      assert.throws(() => parseLatestMetadata(header + body, candidate), /release version matching/);
+    }
     const canonicalBytes = Buffer.from('platform-local canonical updater bytes');
     const canonicalSha512 = crypto.createHash('sha512').update(canonicalBytes).digest('base64');
     fs.rmSync(root, { recursive: true, force: true });

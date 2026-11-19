@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-import { realRootOf } from '../../safety.js';
+import { collectOptionsFromWorkspace, normalizePathList, realRootOf } from '../../safety.js';
 import { statePath } from '../../stateLayout.js';
 import { createEcosystemResolver, supportsEcosystemResolution } from './ecosystemResolution.js';
 import { relationshipKey } from './relationshipPolicy.js';
@@ -124,7 +124,12 @@ function repositoryIndexRoot(config = {}) {
 function repositoryIndexPath(config, workspace) {
   const realRoot = realRootOf(workspace.path);
   const identity = crypto.createHash('sha256').update(realRoot).digest('hex').slice(0, 24);
-  return path.join(repositoryIndexRoot(config), identity, 'graph.db');
+  // The same checkout can have multiple configured collection scopes. Separate
+  // them on disk as well as in memory, including cache-only reads after restart.
+  const { includeRoots, excludePaths } = collectOptionsFromWorkspace(workspace);
+  const canonical = values => [...new Set(normalizePathList(values))].sort();
+  const scope = crypto.createHash('sha256').update(JSON.stringify([canonical(includeRoots), canonical(excludePaths)])).digest('hex').slice(0, 24);
+  return path.join(repositoryIndexRoot(config), identity, scope, 'graph.db');
 }
 
 function openIndexDatabase(file, { readonly = false } = {}) {

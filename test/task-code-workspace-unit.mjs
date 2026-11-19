@@ -109,10 +109,11 @@ try {
     db.prepare('SELECT payload FROM task_history WHERE id=?').get(taskId).payload, { readonly: true });
   try {
     withStateDatabase(config, db => db.prepare('UPDATE task_history SET payload=? WHERE id=?')
-      .run(JSON.stringify({ ...JSON.parse(savedSession), workspace: '' }), taskId), { transaction: true });
+      .run(JSON.stringify({ ...JSON.parse(savedSession), workspace: '', changedFilesTruncated: true }), taskId), { transaction: true });
     const recovered = await describeTaskCodeWorkspace(config, { taskId });
     assert.equal(recovered.workspace, 'app', 'missing saved workspace must resolve from task integrity');
     assert.deepEqual(new Set(recovered.changedFiles), new Set(live.changedFiles));
+    assert.equal(recovered.truncated, false, 'a complete live listing does not depend on a truncated historical preview');
     const recoveredDiff = await readTaskCodeDiff(config, { taskId, path: 'alpha.txt' });
     assert.equal(recoveredDiff.workspace, 'app', 'diff reads must recover the same task-owned project');
   } finally {
@@ -240,6 +241,21 @@ try {
   assert.equal(completedView.readOnly, true);
   assert.equal(completedView.writable, false);
   assert.deepEqual(new Set(completedView.changedFiles), new Set(['alpha.txt', 'beta.txt', 'café.txt']), 'completed tasks must keep their committed file list reviewable');
+  const savedCompleted = withStateDatabase(config, db =>
+    db.prepare('SELECT payload FROM task_history WHERE id=?').get(taskId).payload, { readonly: true });
+  try {
+    const partial = { ...JSON.parse(savedCompleted), changedFiles: ['alpha.txt', 'beta.txt'], changedFileCount: 3, changedFilesTruncated: true };
+    withStateDatabase(config, db => db.prepare('UPDATE task_history SET payload=? WHERE id=?')
+      .run(JSON.stringify(partial), taskId), { transaction: true });
+    const preview = await describeTaskCodeWorkspace(config, { taskId });
+    assert.equal(preview.historyMode, 'committed');
+    assert.equal(preview.truncated, true, 'a retained preview is not a complete inventory of the finished task');
+    assert.deepEqual(new Set(preview.changedFiles), new Set(partial.changedFiles));
+    await assert.rejects(() => readTaskCodeDiff(config, { taskId, path: 'café.txt' }), /not recorded as a change/);
+  } finally {
+    withStateDatabase(config, db => db.prepare('UPDATE task_history SET payload=? WHERE id=?')
+      .run(savedCompleted, taskId), { transaction: true });
+  }
   const completedDiff = await readTaskCodeDiff(config, { taskId, path: 'beta.txt' });
   assert.equal(completedDiff.baseContent.replaceAll('\r\n', '\n'), 'beta baseline\n');
   assert.equal(completedDiff.content.replaceAll('\r\n', '\n'), 'beta from agent\n');

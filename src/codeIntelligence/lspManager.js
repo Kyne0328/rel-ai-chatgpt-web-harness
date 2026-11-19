@@ -194,7 +194,9 @@ class LspSession {
     const stat = fs.statSync(safe.absolutePath);
     const current = this.openDocuments.get(safe.relativePath);
     const uri = pathToFileURL(safe.absolutePath).href;
-    if (current && current.mtimeMs === stat.mtimeMs && current.size === stat.size) {
+    // Editors and restores can preserve mtime and size while replacing or rewriting a file.
+    if (current && current.mtimeMs === stat.mtimeMs && current.size === stat.size
+      && current.ctimeMs === stat.ctimeMs && current.ino === stat.ino) {
       current.lastUsedAt = Date.now();
       current.accessSequence = ++this.documentAccessSequence;
       this.touch();
@@ -214,6 +216,8 @@ class LspSession {
       languageId,
       version: (current?.version || 0) + 1,
       mtimeMs: stat.mtimeMs,
+      ctimeMs: stat.ctimeMs,
+      ino: stat.ino,
       size: stat.size,
       lastUsedAt: Date.now(),
       accessSequence: ++this.documentAccessSequence

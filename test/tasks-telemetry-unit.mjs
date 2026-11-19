@@ -254,8 +254,12 @@ try {
 
     const diagnosticsConfig = { stateDir: root, telemetry: { diagnosticsEnabled: true, sampleRatio: 1 } };
     retainFailedDiagnosticBatch(diagnosticsConfig, failures.slice(0, 1));
-    replayQueuedDiagnostics(diagnosticsConfig);
+    const deliveredBeforeReplay = telemetryStatus(diagnosticsConfig).diagnosticsReplayedFailureReports;
+    assert.equal(replayQueuedDiagnostics(diagnosticsConfig), 1);
+    assert.equal(replayQueuedDiagnostics(diagnosticsConfig), 0, 'an unacknowledged report is already in flight');
     await diagnosticProvider.forceFlush();
+    assert.equal(telemetryStatus(diagnosticsConfig).diagnosticsReplayedFailureReports - deliveredBeforeReplay, 1,
+      'repeated replay before acknowledgement must deliver the same durable report just once');
     assert.equal(queuedDiagnosticFailures(diagnosticsConfig).length, 0, 'confirmed export must acknowledge retained errors');
     retainFailedDiagnosticBatch(diagnosticsConfig, failures.slice(0, 1));
     await runSpan(diagnosticsConfig, 'relai.test.queued_before_opt_out', {}, async () => true);

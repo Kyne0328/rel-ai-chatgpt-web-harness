@@ -265,7 +265,7 @@ const PUBLIC_TOOL_VALUES = [
   },
   {
     name: 'relai_changes', title: 'Review or Restore Changes',
-    description: 'Review/checkpoint/replay changes, restore/reset paths, or tidy work. Authorized workspaces allow scoped read-only review and restore.',
+    description: 'Review or tidy work. Checkpoints save reviews, not backups. Replay is read-only. Restore overwrites named tracked files from the Git index.',
     annotations: annotations(false, true, false, false), dashboard: { capabilities: ['review', 'recover'] },
     groups: ['audit', 'cleanup'], behavior: { taskScope: 'optional' }
   },

@@ -454,17 +454,22 @@ async function sharedGoalEvidence(deps) {
             if (![403, 404].includes(error?.status)) throw error;
             proof = { receipts: [], workIds: [] };
           }
-          const entry = { ...first, at: Date.now(), proof };
-          state.evidence = [...(state.evidence || []).filter(item => item.id !== first.id), entry].slice(-RECENT_GOAL_CHATS);
-          if (proof.receipts.some(receipt => receipt.source === 'assistant_pairing'
-            && receipt.workId === deps.workId && receipt.linkId === deps.linkId
-            && receipt.messageId && receipt.receiptMessageId)) {
+          const entry = { ...first, at: Date.now(), proof, markerProbe: true };
+          const others = (state.evidence || []).filter(item => item.id !== first.id);
+          state.evidence = [...others, entry].slice(-RECENT_GOAL_CHATS);
+          const exact = receipt => receipt.workId === deps.workId && receipt.linkId === deps.linkId
+            && receipt.messageId && receipt.receiptMessageId;
+          if (proof.receipts.some(receipt => receipt.source === 'assistant_pairing' && exact(receipt))) {
             scope.goalIndex = state;
             if (claim?.token && !deps.discoveryStore.save(claim.token, state)) {
               throw Object.assign(new Error('Chat discovery lease changed; rechecking account evidence.'),
                 { deferred: true, retryAt: Date.now() + 5_000 });
             }
-            return [entry];
+            // The newest chat cannot overrule fresh contradictory evidence that
+            // another task already projected in this account/tunnel's index.
+            const conflict = others.find(item => item.at >= freshness && entry.at - item.at < EVIDENCE_TTL_MS
+              && item.proof?.receipts?.some(exact));
+            return conflict ? [entry, conflict] : [entry];
           }
         }
       }
@@ -480,7 +485,9 @@ async function sharedGoalEvidence(deps) {
       };
       // A previously projected exact receipt is only a candidate, but it can
       // skip unrelated body reads: the caller still verifies its active branch.
-      const hasCandidateReceipt = candidates.some(item => fresh(item)
+      // A marker-only precheck is not a completed ordinary/Project scan batch.
+      // Its inline tool receipt must not suppress checks of the other candidates.
+      const hasCandidateReceipt = candidates.some(item => fresh(item) && !byId.get(item.id).markerProbe
         && byId.get(item.id)?.proof?.receipts?.some(receipt => receipt.workId === deps.workId
           && (!deps.linkId || receipt.linkId === deps.linkId)));
       // Never select by list position: new chats can reorder the catalogue.
