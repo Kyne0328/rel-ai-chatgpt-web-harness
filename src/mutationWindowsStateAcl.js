@@ -17,9 +17,9 @@ const SCRIPT = [
   "  $acl = Get-Acl -LiteralPath $path",
   "  $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value",
   "  if ($owner -ne $me) { exit 1 }",
-  "  foreach ($rule in $acl.Access) {",
+  "  foreach ($rule in $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {",
   "    if ($rule.AccessControlType -ne 'Allow') { continue }",
-  "    $sid = $rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value",
+  "    $sid = $rule.IdentityReference.Value",
   "    if ($trusted -notcontains $sid -and (([int]$rule.FileSystemRights -band $writeMask) -ne 0)) { exit 1 }",
   "  }",
   "}",
@@ -58,35 +58,32 @@ async function privatelyOwnedWindowsPaths(files) {
       // A PowerShell 7 module path can make Windows PowerShell 5 unable to
       // load Get-Acl. Resolve its native modules in the probe's own runtime.
       for (const key of Object.keys(env)) if (key.toLowerCase() === 'psmodulepath') delete env[key];
+      const probe = () => execFileAsync(exe, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', SCRIPT], {
+        env, encoding: 'utf8', windowsHide: true, timeout: 5000, maxBuffer: 4096
+      });
       let verified = false;
       // A controller may atomically publish its startup receipt while ACLs
       // are sampled. Retry changed metadata; never cache a mismatched proof.
       for (let attempt = 0; attempt < 3 && !verified; attempt++) {
         const before = batch.map(fingerprint);
         const identities = batch.map(fileIdentity);
-        let stdout;
         try {
-          ({ stdout } = await execFileAsync(exe, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', SCRIPT], {
-            env, encoding: 'utf8', windowsHide: true, timeout: 5000, maxBuffer: 4096
-          }));
-        } catch (error) {
-          // An active native writer can briefly prevent Get-Acl from opening
-          // the receipt. A failed check grants no authority; retry the probe.
-          if (attempt === 2) throw error;
-          continue;
-        }
-        if (stdout !== 'OK') return false;
-        if (batch.some((file, index) => fileIdentity(file) !== identities[index])) continue;
-        if (batch.some((file, index) => fingerprint(file) !== before[index])) {
-          // Native job receipts are rewritten while their process is running.
-          // Recheck the actual ACL instead of treating content writes as an
-          // ownership change. Never cache a proof for a changing file.
-          const confirmation = await execFileAsync(exe, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', SCRIPT], {
-            env, encoding: 'utf8', windowsHide: true, timeout: 5000, maxBuffer: 4096
-          });
-          if (confirmation.stdout !== 'OK') return false;
+          const { stdout } = await probe();
+          if (stdout !== 'OK') return false;
           if (batch.some((file, index) => fileIdentity(file) !== identities[index])) continue;
-          verified = true;
+          if (batch.some((file, index) => fingerprint(file) !== before[index])) {
+            // A live receipt can change during either probe. Confirm the ACL
+            // again, then require unchanged file identity and do not cache it.
+            const confirmation = await probe();
+            if (confirmation.stdout !== 'OK') return false;
+            if (batch.some((file, index) => fileIdentity(file) !== identities[index])) continue;
+            verified = true;
+            continue;
+          }
+        } catch (error) {
+          // Retry the entire attempt if either ACL read fails while a writer
+          // is active. No failed or partial probe grants authority.
+          if (attempt === 2) throw error;
           continue;
         }
         const at = Date.now();

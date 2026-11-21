@@ -9,13 +9,14 @@ function hasRequestedChecks(args = {}) {
 }
 
 function normalizeVerifyChecks(args, root, level) {
-  const discovered = discoverCommands(root);
-  const catalog = buildCheckCatalog(discoverRepositoryTopology(root));
+  const topology = discoverRepositoryTopology(root, { fresh: true });
+  const discovered = discoverCommands(root, { topology });
+  const catalog = buildCheckCatalog(topology);
   const aliasNormalizations = { count: 0 };
   const explicit = collectExplicitChecks(args);
   const candidates = explicit.length
     ? explicit.map((raw, index) => resolveExplicitUnit(raw, index, discovered, catalog, aliasNormalizations))
-    : detectVerifyCheckUnits(root, level);
+    : detectVerifyCheckUnits(root, level, topology);
   const checkUnits = [];
   const skippedChecks = [];
   const seen = new Set();

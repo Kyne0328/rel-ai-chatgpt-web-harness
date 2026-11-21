@@ -85,7 +85,13 @@ try {
     assert.equal(calls, 1, 'an unindexed legacy receipt must be replayed, never re-executed');
     const malformed = path.join(receiptDirectory, 'fallback_legacy_work_pointer_0000000000000000000000000.json');
     const intact = fs.readFileSync(malformed, 'utf8');
-    fs.writeFileSync(malformed, '{');
+    // A single receipt beyond the synchronous byte budget forces the async
+    // scan regardless of directory enumeration order. The repaired bytes
+    // preserve size, mtime and filename, so only the file's identity changes.
+    const paddedReceiptLength = 600 * 1024;
+    const fixedMtime = new Date('2020-01-02T00:00:00Z');
+    fs.writeFileSync(malformed, '{'.padEnd(paddedReceiptLength));
+    fs.utimesSync(malformed, fixedMtime, fixedMtime);
     fallback.resetFallbackExecutions();
     const blocked = (await handleTransportFallbackRequest(legacyConfig,
       make('legacy-scope-invalid', { ...args, command: 'different harmless fixture' }, 'relai_exec'),
@@ -93,7 +99,14 @@ try {
     assert.equal(blocked.errorCode, 'FALLBACK_RECOVERY_UNAVAILABLE');
     assert.equal(blocked.executed, false);
     assert.equal(calls, 1, 'unreadable legacy evidence must not admit a new operation');
-    fs.writeFileSync(malformed, intact);
+    const stillBlocked = (await handleTransportFallbackRequest(legacyConfig,
+      make('legacy-scope-still-invalid', { ...args, command: 'different harmless fixture' }, 'relai_exec'),
+      { ...options, synchronousFallbackGraceMs: 1000, executeToolResult })).body.result.structuredContent;
+    assert.equal(stillBlocked.errorCode, 'FALLBACK_RECOVERY_UNAVAILABLE');
+    assert.equal(stillBlocked.executed, false);
+    assert.equal(calls, 1, 'an unchanged failed scan must still block execution');
+    fs.writeFileSync(malformed, intact.padEnd(paddedReceiptLength));
+    fs.utimesSync(malformed, fixedMtime, fixedMtime);
     const novel = (await handleTransportFallbackRequest(legacyConfig,
       make('legacy-scope-new', { ...args, command: 'different harmless fixture' }, 'relai_exec'),
       { ...options, synchronousFallbackGraceMs: 1000, executeToolResult })).body.result.structuredContent;

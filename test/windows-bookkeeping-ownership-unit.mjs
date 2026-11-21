@@ -45,10 +45,18 @@ const originalSpawn = childProcess.spawn;
 // can grant inherited Users access to newly created temporary directories.
 // Keep the fixture private rather than weakening the production ACL check.
 const powershell = path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+const nativePowerShellEnv = Object.fromEntries(Object.entries(process.env)
+  .filter(([key]) => key.toLowerCase() !== 'psmodulepath'));
 const ownerSid = childProcess.execFileSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
-  '[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value'], { encoding: 'utf8', windowsHide: true }).trim();
+  '[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value'],
+{ env: nativePowerShellEnv, encoding: 'utf8', windowsHide: true }).trim();
+const icacls = path.join(process.env.SystemRoot, 'System32', 'icacls.exe');
+function setFixtureOwner(file) {
+  childProcess.execFileSync(icacls, [file, '/setowner', `*${ownerSid}`], { windowsHide: true, stdio: 'pipe' });
+}
 function restrictFixtureState(directory) {
-  childProcess.execFileSync(path.join(process.env.SystemRoot, 'System32', 'icacls.exe'),
+  setFixtureOwner(directory);
+  childProcess.execFileSync(icacls,
     [directory, '/inheritance:r', '/grant:r', `*${ownerSid}:(OI)(CI)F`], { windowsHide: true, stdio: 'ignore' });
 }
 try {
@@ -57,6 +65,20 @@ try {
   restrictFixtureState(activeState);
   const activeReceipt = path.join(activeState, 'receipt.json');
   fs.writeFileSync(activeReceipt, '{}');
+  if (process.env.CI) {
+    const defaults = childProcess.execFileSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', [
+      "$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()",
+      "$acl = Get-Acl -LiteralPath $env:RELAI_FIXTURE_RECEIPT",
+      "[Console]::Out.Write(('Windows ACL fixture default owner is user: token={0}; new receipt={1}' -f ($identity.Owner.Value -eq $identity.User.Value), ($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -eq $identity.User.Value)))"
+    ].join('; ')], { env: { ...nativePowerShellEnv, RELAI_FIXTURE_RECEIPT: activeReceipt }, encoding: 'utf8', windowsHide: true });
+    console.log(defaults);
+  }
+  setFixtureOwner(activeReceipt);
+  assert.equal(await privatelyOwnedWindowsPaths([activeState, activeReceipt]), true,
+    'the idle fixture must pass native ownership and write-permission checks before the heartbeat');
+  // Invalidate the stable receipt proof and then keep writing throughout the
+  // native probe, so the active-write assertion cannot use the control cache.
+  fs.writeFileSync(activeReceipt, '{"active":true}');
   const heartbeat = setInterval(() => fs.writeFileSync(activeReceipt, JSON.stringify({ at: Date.now() })), 15);
   try {
     assert.equal(await privatelyOwnedWindowsPaths([activeState, activeReceipt]), true,
@@ -64,7 +86,7 @@ try {
   } finally {
     clearInterval(heartbeat);
   }
-  childProcess.execFileSync(path.join(process.env.SystemRoot, 'System32', 'icacls.exe'),
+  childProcess.execFileSync(icacls,
     [activeReceipt, '/grant', '*S-1-5-11:W'], { windowsHide: true, stdio: 'ignore' });
   assert.equal(await privatelyOwnedWindowsPaths([activeReceipt]), false,
     'ACL recheck must reject write access granted to unrelated principals');

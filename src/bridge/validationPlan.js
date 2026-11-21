@@ -60,11 +60,11 @@ async function createValidationPlan(workspace, config, args = {}) {
       }
     }
   }
-  const topology = discoverRepositoryTopology(workspace.path);
+  const topology = discoverRepositoryTopology(workspace.path, { fresh: true });
   const packageIds = [...new Set(changedFiles.map(file => packageForPath(topology, file)?.id).filter(Boolean))];
-  const quickUnits = detectVerifyCheckUnits(workspace.path, 'quick');
-  const standardUnits = detectVerifyCheckUnits(workspace.path, 'standard');
-  const releaseUnits = detectVerifyCheckUnits(workspace.path, 'release');
+  const quickUnits = detectVerifyCheckUnits(workspace.path, 'quick', topology);
+  const standardUnits = detectVerifyCheckUnits(workspace.path, 'standard', topology);
+  const releaseUnits = detectVerifyCheckUnits(workspace.path, 'release', topology);
   const packageScoped = units => packageIds.length ? units.filter(unit => packageIds.includes(unit.packageId) || !unit.packageId) : units;
   const quick = packageScoped(quickUnits).map(checkReference);
   const standard = packageScoped(standardUnits).map(checkReference);
@@ -74,7 +74,7 @@ async function createValidationPlan(workspace, config, args = {}) {
   const impactedPaths = normalizePaths(impact.impactedPaths || []).slice(0, 200);
   const classification = classifyWorkflowRisk({ changedFiles, packageIds, affectedTests, impactedPaths });
   const requestedScope = normalizePaths([...changedFiles, ...affectedTests, ...impactedPaths]);
-  const fingerprint = await createValidationFingerprint(workspace, config, { status, paths: requestedScope, signal });
+  const fingerprint = await createValidationFingerprint(workspace, config, { status, paths: requestedScope, topology, signal });
   const payload = {
     version: 2,
     workspace: workspace.alias,
@@ -143,10 +143,11 @@ async function createValidationFingerprint(workspace, config, options = {}) {
   const repositoryHead = typeof status?.repositoryHead === 'string'
     ? status.repositoryHead
     : status?.unborn === true ? '' : await readRepositoryHead(workspace, config, signal);
+  const topology = options.topology || discoverRepositoryTopology(workspace.path, { fresh: true });
   const checks = {
-    quick: detectVerifyChecks(workspace.path, 'quick'),
-    standard: detectVerifyChecks(workspace.path, 'standard'),
-    release: detectVerifyChecks(workspace.path, 'release')
+    quick: detectVerifyChecks(workspace.path, 'quick', topology),
+    standard: detectVerifyChecks(workspace.path, 'standard', topology),
+    release: detectVerifyChecks(workspace.path, 'release', topology)
   };
   const descriptor = {
     version: FINGERPRINT_VERSION,

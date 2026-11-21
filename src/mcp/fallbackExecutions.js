@@ -303,11 +303,24 @@ function legacyDirectoryStamp(root) {
   }
 }
 
+function legacyRecordStamp(stat) {
+  return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+}
+
+function legacyFailedRecordChanged(failure) {
+  if (!failure) return false;
+  try {
+    return legacyRecordStamp(fs.statSync(failure.file, { bigint: true })) !== failure.stamp;
+  } catch (error) {
+    return error?.code === 'ENOENT' && failure.stamp !== null;
+  }
+}
+
 // A missing pre-index scope is not evidence of absence. An overflowing
 // synchronous probe continues in small asynchronous slices; retries use its
 // progress instead of traversing the first entries again on every request.
 function beginLegacyScopeRecovery(root, stamp) {
-  const state = { stamp, status: 'running', candidates: [], error: null, promise: null };
+  const state = { stamp, status: 'running', candidates: [], error: null, failedRecord: null, promise: null };
   legacyScopeRecoveries.set(root, state);
   state.promise = (async () => {
     let entries = 0;
@@ -322,17 +335,23 @@ function beginLegacyScopeRecovery(root, stamp) {
         }
         if (entry.isFile() && /^fallback_[A-Za-z0-9_-]{20,160}\.json$/.test(entry.name)) {
           const file = path.join(root, entry.name);
-          const stat = await fs.promises.stat(file);
-          if (!stat.isFile() || stat.size > LEGACY_RECOVERY_FILE_BYTES
-            || bytes + stat.size > LEGACY_RECOVERY_MAX_BYTES) {
+          // Remember the pre-read identity if parsing or reading fails. An
+          // in-place repair changes this file without touching its directory.
+          state.failedRecord = { file, stamp: null };
+          const stat = await fs.promises.stat(file, { bigint: true });
+          state.failedRecord.stamp = legacyRecordStamp(stat);
+          const size = Number(stat.size);
+          if (!stat.isFile() || size > LEGACY_RECOVERY_FILE_BYTES
+            || bytes + size > LEGACY_RECOVERY_MAX_BYTES) {
             throw legacyRecoveryError('Legacy replay recovery exceeded the retained byte limit.');
           }
-          bytes += stat.size;
+          bytes += size;
           const record = JSON.parse(await fs.promises.readFile(file, 'utf8'));
           if (!record || record.operationId !== entry.name.slice(0, -5)) {
             throw legacyRecoveryError('A retained operation record has invalid ownership.');
           }
           if (!record.workId) state.candidates.push(record);
+          state.failedRecord = null;
         }
         if (entries % 64 === 0 || Date.now() - sliceStart >= LEGACY_SYNC_MS) {
           await new Promise(resolve => setImmediate(resolve));
@@ -383,9 +402,10 @@ function readPersistedScope(config, reference, options = {}) {
   const stamp = legacyDirectoryStamp(root);
   if (stamp === null) return [];
   let recovery = legacyScopeRecoveries.get(root);
-  if (recovery && recovery.stamp !== stamp) {
-    // Cleanup or another writer changed the directory while replay was running.
-    // Restart in the background instead of redoing a synchronous scan on each retry.
+  if (recovery && (recovery.stamp !== stamp
+    || (recovery.status === 'failed' && legacyFailedRecordChanged(recovery.failedRecord)))) {
+    // Repeat the bounded scan after directory changes or repair of the failed
+    // record. Never treat the old scan failure as proof of absence.
     recovery = beginLegacyScopeRecovery(root, stamp);
   }
   if (recovery) {

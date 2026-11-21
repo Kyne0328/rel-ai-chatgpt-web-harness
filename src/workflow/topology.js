@@ -9,20 +9,24 @@ const MANIFEST_NAMES = new Set(['package.json', 'pubspec.yaml', 'go.mod', 'Cargo
 const SKIP_DIRS = new Set(['.git', 'node_modules', 'dist', 'build', 'coverage', '.next', '.nuxt', '.turbo', '.cache', '.relai', '.rel-ai', 'state']);
 const cache = new Map();
 
-function discoverRepositoryTopology(rootPath) {
+function discoverRepositoryTopology(rootPath, { fresh = false } = {}) {
   const root = path.resolve(String(rootPath || '.'));
   const now = Date.now();
   const cached = cache.get(root);
-  if (cached && now - cached.checkedAt < TOPOLOGY_RECHECK_MS) {
+  if (!fresh && cached && now - cached.checkedAt < TOPOLOGY_RECHECK_MS) {
     return structuredClone(cached.value);
   }
-  if (cached && probeManifestSignature(cached.manifests) === cached.signature) {
+  if (!fresh && cached && probeManifestSignature(cached.manifests) === cached.signature) {
     cached.checkedAt = now;
     return structuredClone(cached.value);
   }
   const collection = collectManifests(root);
   const manifests = collection.manifests;
   const signature = manifestSignature(manifests);
+  if (!collection.truncated && cached?.signature === signature) {
+    cached.checkedAt = now;
+    return structuredClone(cached.value);
+  }
   const packages = linkWorkspaceDependencies(manifests.map(item => packageFromManifest(root, item)).filter(Boolean));
   const value = {
     version: 2,
@@ -60,8 +64,9 @@ function collectManifests(root) {
       if (found.length >= MAX_MANIFESTS) { truncated = true; return { manifests: found.sort((a, b) => a.relative.localeCompare(b.relative)), truncated }; }
       const absolute = path.join(current.absolute, entry.name);
       let stat;
-      try { stat = fs.statSync(absolute); } catch { continue; }
-      found.push({ absolute, relative: normalize(path.relative(root, absolute)), size: stat.size, mtimeMs: Math.trunc(stat.mtimeMs) });
+      try { stat = fs.statSync(absolute, { bigint: true }); } catch { continue; }
+      if (!stat.isFile()) continue;
+      found.push({ absolute, relative: normalize(path.relative(root, absolute)), stamp: manifestStamp(stat) });
     }
   }
   return { manifests: found.sort((a, b) => a.relative.localeCompare(b.relative)), truncated };
@@ -122,15 +127,20 @@ function invalidateRepositoryTopology(rootPath, changedFiles = []) {
 }
 
 function manifestSignature(manifests) {
-  return manifests.map(item => `${item.relative}:${item.size}:${item.mtimeMs}`).join('|');
+  return JSON.stringify(manifests.map(item => [item.relative, item.stamp]));
+}
+
+function manifestStamp(stat) {
+  return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
 }
 
 function probeManifestSignature(manifests = []) {
   const current = [];
   for (const manifest of manifests) {
     let stat;
-    try { stat = fs.statSync(manifest.absolute); } catch { return null; }
-    current.push({ ...manifest, size: stat.size, mtimeMs: Math.trunc(stat.mtimeMs) });
+    try { stat = fs.statSync(manifest.absolute, { bigint: true }); } catch { return null; }
+    if (!stat.isFile()) return null;
+    current.push({ ...manifest, stamp: manifestStamp(stat) });
   }
   return manifestSignature(current);
 }

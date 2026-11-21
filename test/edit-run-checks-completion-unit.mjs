@@ -5,6 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { clearAuditHistory } from '../src/audit.js';
+import { detectVerifyChecks } from '../src/bridge/checkDetection.js';
+import { normalizeVerifyChecks } from '../src/bridge/validationChecks.js';
 import { flushLocalAnalytics } from '../src/localAnalytics.ts';
 import { callTool as rawCallTool } from '../src/tools.js';
 import { clearTaskHistory, flushTaskHistoryPersistence } from '../src/taskHistoryStore.ts';
@@ -43,6 +45,27 @@ fs.writeFileSync(configPath, JSON.stringify({
 process.env.REL_AI_MCP_CONFIG = configPath;
 
 try {
+  // The dashboard may reuse topology briefly, but validation must see the
+  // manifest's new commands even at the same instant on that cache clock.
+  const discoveryFixture = path.join(root, 'discovery');
+  fs.mkdirSync(path.join(discoveryFixture, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(discoveryFixture, 'src', 'tools.js'), 'export const ready = true;\n');
+  const discoveryManifest = path.join(discoveryFixture, 'package.json');
+  const checkManifest = JSON.stringify({ scripts: { check: 'node --check src/failing.js' } });
+  const fixedMtime = new Date('2020-01-02T00:00:00Z');
+  fs.writeFileSync(discoveryManifest, '{}'.padEnd(checkManifest.length));
+  fs.utimesSync(discoveryManifest, fixedMtime, fixedMtime);
+  const originalNow = Date.now;
+  try {
+    const frozenNow = originalNow();
+    Date.now = () => frozenNow;
+    assert.deepEqual(detectVerifyChecks(discoveryFixture, 'quick'), ['node --check src/tools.js']);
+    fs.writeFileSync(discoveryManifest, checkManifest);
+    fs.utimesSync(discoveryManifest, fixedMtime, fixedMtime);
+    assert.deepEqual(normalizeVerifyChecks({}, discoveryFixture, 'quick').checks, ['npm run check']);
+  } finally {
+    Date.now = originalNow;
+  }
   const context = { publicHttpOnly: true };
   resetToolActivity();
   const task = await callTool('relai_work', { mode: 'normal', action: 'begin', workspace: 'app', bootstrap: 'none' }, context);

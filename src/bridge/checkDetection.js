@@ -9,20 +9,19 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { discoveryManifestSignature } from "../commandDiscovery.js";
 import { buildCheckCatalog } from "../workflow/checkCatalog.js";
 import { discoverRepositoryTopology } from "../workflow/topology.js";
 import { detectPackageJsonChecks } from './checkDetectionNpm.js';
 
-// Each detection re-reads and re-parses package.json. Cache per (root, level) against
-// the same manifest stat signature command discovery uses, so any manifest edit is
-// still picked up immediately.
+// Cache parsing per (root, level) against the topology snapshot used to
+// select checks. Validation callers supply a fresh snapshot, rather than the
+// short-lived cache used by dashboard and diagnostic callers.
 const CHECK_CACHE_LIMIT = 64;
 const checkCache = new Map();
 
-function detectVerifyChecks(root, level) {
+function detectVerifyChecks(root, level, topology = discoverRepositoryTopology(root)) {
   const key = `${root}::${level}`;
-  const signature = discoveryManifestSignature(root);
+  const signature = topology.fingerprint;
   const cached = checkCache.get(key);
   // Copy on the way out: callers place the array straight into tool responses.
   if (cached?.signature === signature) return [...cached.commands];
@@ -38,17 +37,16 @@ function detectVerifyChecks(root, level) {
   return [...unique];
 }
 
-function detectVerifyCheckUnits(root, level) {
-  const topology = discoverRepositoryTopology(root);
+function detectVerifyCheckUnits(root, level, topology = discoverRepositoryTopology(root)) {
   const catalog = buildCheckCatalog(topology);
   const hasNested = topology.packages.some(pkg => pkg.path !== '.');
   if (!hasNested) {
-    return detectVerifyChecks(root, level).map((command, index) => {
+    return detectVerifyChecks(root, level, topology).map((command, index) => {
       const matched = catalog.find(unit => unit.command === command && unit.cwd === '.');
       return matched || { id: `detected:root:${index}`, packageId: '', cwd: '.', command, kind: 'other', level: level === 'quick' ? 'focused' : 'standard', estimatedCost: 'small', source: 'detected', scopeKey: 'repository' };
     });
   }
-  const rootUnits = detectVerifyChecks(root, level).map((command, index) => {
+  const rootUnits = detectVerifyChecks(root, level, topology).map((command, index) => {
     const matched = catalog.find(unit => unit.command === command && unit.cwd === '.');
     return matched || { id: `detected:root:${index}`, packageId: '', cwd: '.', command, kind: 'verification', level: level === 'quick' ? 'focused' : 'standard', estimatedCost: 'small', source: 'detected', scopeKey: 'repository' };
   });
