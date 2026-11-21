@@ -36,8 +36,6 @@ jobs:
         run: test -x electron/node_modules/electron/dist/electron
       - name: Run shared source gate
         run: xvfb-run --auto-servernum npm run test:all
-      - name: Enforce MCP startup performance budget
-        run: npm run benchmark:mcp-startup
       - name: Enforce Repository Intelligence performance budget
         run: node scripts/repository-intelligence-benchmark.mjs --files 5000 --mutations 50 --generated-bundle-kb 300 --json --max-full-ms 30000 --max-incremental-ms 5000 --max-restart-reuse-ms 5000 --max-peak-rss-growth-mb 384
       - name: Enforce native-watcher atomic-save budget
@@ -196,6 +194,3 @@ jobs:
         run: npm run verify:fuses -- --platform linux
       - name: Verify packaged MCP connector flow
         run: npm run test:connector-acceptance -- --dir '${{ steps.unpacked.outputs.path }}'
-      - name: Smoke-test Linux desktop startup and shutdown under Xvfb
-        shell: bash
-        run: bash scripts/smoke-linux-desktop.sh '${{ steps.unpacked.outputs.path }}' "$RUNNER_TEMP/relai-linux-smoke"

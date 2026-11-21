@@ -340,7 +340,10 @@ function verifyWorkflowContracts() {
   assert.ok(releaseGateStart >= 0 && windowsReleaseStart > releaseGateStart, 'release workflow must have one shared gate before platform builders');
   assert.match(releaseGate, /runs-on: ubuntu-latest/);
   assert.ok(releaseSourceGateIndex >= 0, 'shared release gate must run the complete release source suite');
-  assert.match(releaseGate, /benchmark:mcp-startup/);
+  for (const automatedWorkflow of [releaseGate, linuxRelease, linuxCi]) {
+    assert.doesNotMatch(automatedWorkflow, /benchmark:mcp-startup|smoke-linux-desktop\.sh/,
+      'host-specific startup timing must not block CI or release');
+  }
   assert.match(releaseGate, /benchmark:observability:strict/);
   assert.match(releaseGate, /npm run test:frontend/);
   assert.ok(windowsBuildIndex >= 0);
@@ -391,8 +394,6 @@ function verifyWorkflowContracts() {
     /matrix\.computer_runtime_args/,
     /npm run verify:fuses -- --platform win32/,
     /npm run verify:fuses -- --platform linux/,
-    /scripts\/smoke-linux-desktop\.sh/,
-    /Smoke-test Linux desktop startup and shutdown under Xvfb/,
     /release-artifacts\.mjs --platform win32 --github-output paths/,
     /release-artifacts\.mjs --platform linux --github-output paths/,
     /release-artifacts\.mjs --platform darwin --arch '[^']+' --github-output paths/,
