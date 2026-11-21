@@ -51,11 +51,7 @@ const ownerSid = childProcess.execFileSync(powershell, ['-NoLogo', '-NoProfile',
   '[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value'],
 { env: nativePowerShellEnv, encoding: 'utf8', windowsHide: true }).trim();
 const icacls = path.join(process.env.SystemRoot, 'System32', 'icacls.exe');
-function setFixtureOwner(file) {
-  childProcess.execFileSync(icacls, [file, '/setowner', `*${ownerSid}`], { windowsHide: true, stdio: 'pipe' });
-}
 function restrictFixtureState(directory) {
-  setFixtureOwner(directory);
   childProcess.execFileSync(icacls,
     [directory, '/inheritance:r', '/grant:r', `*${ownerSid}:(OI)(CI)F`], { windowsHide: true, stdio: 'ignore' });
 }
@@ -73,9 +69,8 @@ try {
     ].join('; ')], { env: { ...nativePowerShellEnv, RELAI_FIXTURE_RECEIPT: activeReceipt }, encoding: 'utf8', windowsHide: true });
     console.log(defaults);
   }
-  setFixtureOwner(activeReceipt);
   assert.equal(await privatelyOwnedWindowsPaths([activeState, activeReceipt]), true,
-    'the idle fixture must pass native ownership and write-permission checks before the heartbeat');
+    'new fixture objects must be owned by the user before the heartbeat; on elevated runners use windows-bookkeeping-ownership-runner.ps1');
   // Invalidate the stable receipt proof and then keep writing throughout the
   // native probe, so the active-write assertion cannot use the control cache.
   fs.writeFileSync(activeReceipt, '{"active":true}');

@@ -201,7 +201,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm run test:pty
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node test/windows-bookkeeping-ownership-unit.mjs
+          pwsh -NoLogo -NoProfile -NonInteractive -File test/windows-bookkeeping-ownership-runner.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $env:RELAI_NATIVE_APP_CAPTURE_FIXTURE = '1'
           node test/computer-app-capture-native.mjs
@@ -454,6 +454,8 @@ jobs:
         with:
           node-version-file: .node-version
           cache: npm
+      - name: Use declared npm
+        run: node scripts/ensure-package-manager.mjs
       - name: Install release validation dependencies
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Download Windows release bundle
@@ -485,6 +487,8 @@ jobs:
         with:
           node-version-file: .node-version
           cache: npm
+      - name: Use declared npm
+        run: node scripts/ensure-package-manager.mjs
       - name: Install release validation dependencies
         run: |
           sudo apt-get update

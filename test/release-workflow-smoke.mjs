@@ -318,7 +318,7 @@ function verifyWorkflowContracts() {
     'release builds must not enforce machine-dependent mutation accounting latency on shared runners');
   for (const [name, platformGate] of [['normal CI', windowsCi], ['release', windowsRelease]]) {
     assert.match(platformGate, /runs-on: windows-latest/);
-    assert.match(platformGate, /node test\/windows-bookkeeping-ownership-unit\.mjs\s+if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}/,
+    assert.match(platformGate, /pwsh -NoLogo -NoProfile -NonInteractive -File test\/windows-bookkeeping-ownership-runner\.ps1\s+if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}/,
       `${name} must execute the native Windows bookkeeping regression and propagate its failure`);
     assert.match(platformGate, /node test\/windows-process-job-native-unit\.mjs\s+if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}/,
       `${name} must verify native owned-process lifetime and propagate its failure`);
