@@ -6,6 +6,7 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import { buildTaskContinuity } from '../src/context/taskContinuity.js';
+import { resolveWorkspace } from '../src/config.js';
 import { ensureLearningState, knowledgeDatabasePath, learnedValidationChecks, recordTaskValidationAffinity } from '../src/knowledgeStore.js';
 import { flushTaskHistoryPersistence, readTaskHistorySessionRecord } from '../src/taskHistoryStore.ts';
 import { resetToolActivity } from '../src/toolActivity.js';
@@ -192,7 +193,7 @@ try {
   assert(learnedValidationChecks(portableRestored, 'app', ['src/index.js']).some(item => item.command === 'node --check src/index.js'),
     'state import must preserve validated path-to-command affinity');
 
-  await repositoryIntelligence.ensure({ alias: 'app', path: workspace, context: {} }, config, { watch: false });
+  await repositoryIntelligence.ensure(resolveWorkspace(config, 'app'), config, { watch: false });
   const compactWithRepositorySummary = await callTool('relai_work', { mode: 'normal',
     action: 'begin', workspace: 'app', title: 'Inspect alpha syntax', objective: 'Inspect alpha syntax', bootstrap: 'compact'
   }, context);

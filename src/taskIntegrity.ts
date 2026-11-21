@@ -323,9 +323,9 @@ function releaseTaskChangedFiles(config: IntegrityConfig, taskId: unknown, works
   });
 }
 
-function readWorkspaceIntegrity(config: IntegrityConfig, workspaceAlias: unknown): WorkspaceIntegrityState {
+function readWorkspaceIntegrity(config: IntegrityConfig, workspaceAlias: unknown, options: { timeoutMs?: number } = {}): WorkspaceIntegrityState {
   try {
-    return withIntegrityDatabase(config, db => normalizeWorkspaceState(readWorkspaceRow(db, workspaceAlias) || createWorkspaceState(workspaceAlias)));
+    return withIntegrityDatabase(config, db => normalizeWorkspaceState(readWorkspaceRow(db, workspaceAlias) || createWorkspaceState(workspaceAlias)), options);
   } catch (error) {
     if (error instanceof TaskIntegrityError) throw error;
     throw new TaskIntegrityError('TASK_INTEGRITY_STATE_INVALID', `Workspace integrity state is unreadable for '${String(workspaceAlias || '')}'.`, { cause: error });
@@ -851,13 +851,13 @@ function integrityDir(config: IntegrityConfig): string {
 function withIntegrityDatabase<TResult>(
   config: IntegrityConfig,
   operation: (db: DatabaseSync) => TResult,
-  options: { transaction?: boolean; readonly?: boolean } = {}
+  options: { transaction?: boolean; readonly?: boolean; timeoutMs?: number } = {}
 ): TResult {
   migrateLegacyIntegrity(config);
   return withStateDatabase(config, operation, {
     ...options,
     readonly: options.readonly === true || options.transaction !== true,
-    timeoutMs: INTEGRITY_SQLITE_TIMEOUT_MS
+    timeoutMs: options.timeoutMs ?? INTEGRITY_SQLITE_TIMEOUT_MS
   }) as TResult;
 }
 

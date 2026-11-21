@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SERVER_INFO_META_KEY } from '@modelcontextprotocol/server';
+import { resolveWorkspace } from '../src/config.js';
 import { recordTaskValidationAffinity, learnedValidationChecks } from '../src/knowledgeStore.js';
 import { flushLocalAnalytics, readLocalUsageSnapshot, recordLocalTaskCompletion, recordLocalToolOutcome } from '../src/localAnalytics.js';
 import { repositoryIndexPath } from '../src/repository/intelligence/database.js';
@@ -434,7 +435,8 @@ try {
   assert.ok((await retrySqliteBusy(() => learnedValidationChecks(workspaceStateConfig, 'secondary', ['src/secondary.js']))).length > 0,
     'workspace deletion regression must seed workspace validation affinity');
 
-  const secondaryIndexDirectory = path.dirname(repositoryIndexPath({ stateDir }, { alias: 'secondary', path: secondaryPath }));
+  const savedConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  const secondaryIndexDirectory = path.dirname(repositoryIndexPath(savedConfig, resolveWorkspace(savedConfig, 'secondary')));
   fs.mkdirSync(secondaryIndexDirectory, { recursive: true });
   fs.writeFileSync(path.join(secondaryIndexDirectory, 'stale-cache-marker'), 'delete me\n');
   const workspaceDelete = await fetch(`${base}/api/workspaces`, {

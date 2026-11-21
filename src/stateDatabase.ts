@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { setTimeout as delay } from 'node:timers/promises';
 
 import type { DatabasePersistenceResult } from './contracts/persistence.ts';
 import { statePath } from './stateLayout.js';
@@ -446,6 +447,42 @@ function stateDatabaseBackupPath(config: StateDatabaseConfig = {}): string {
   return sqliteBackupPath(stateDatabasePath(config));
 }
 
+function isStateDatabaseBusy(error: unknown): boolean {
+  for (let depth = 0; error && typeof error === 'object' && depth < 4; depth += 1) {
+    const { errcode, code, cause } = error as { errcode?: number; code?: string; cause?: unknown };
+    if ((Number(errcode) & 0xff) === 5 || code === 'SQLITE_BUSY') return true;
+    error = cause;
+  }
+  return false;
+}
+
+/** Only for reads or operations that can prove failure preceded publication. */
+async function retryStateDatabaseBusy<T>(
+  operation: () => T | Promise<T>,
+  options: { signal?: AbortSignal; deadlineAtMs?: number; shouldRetry?: (error: unknown) => boolean } = {}
+): Promise<T> {
+  const { signal, deadlineAtMs, shouldRetry } = options;
+  const hasDeadline = typeof deadlineAtMs === 'number' && Number.isFinite(deadlineAtMs) && deadlineAtMs > 0;
+  const stopAt = performance.now() + (hasDeadline ? Math.min(1000, Math.max(0, deadlineAtMs - Date.now())) : 1000);
+  let busyError: unknown;
+  for (;;) {
+    signal?.throwIfAborted();
+    if (hasDeadline && Date.now() >= deadlineAtMs) throw new DOMException('Durable state access deadline expired.', 'TimeoutError');
+    if (busyError && performance.now() >= stopAt) throw busyError;
+    try {
+      return await operation();
+    } catch (error) {
+      if (!isStateDatabaseBusy(error) || (shouldRetry && !shouldRetry(error))) throw error;
+      busyError = error;
+    }
+    const remaining = stopAt - performance.now();
+    if (remaining > 0) {
+      try { await delay(Math.min(20, remaining), undefined, { signal }); }
+      catch (error) { signal?.throwIfAborted(); throw error; }
+    }
+  }
+}
+
 function openStateDatabase(config: StateDatabaseConfig = {}, options: OpenStateDatabaseOptions = {}): DatabaseSync | null {
   const readonly = options.readonly === true;
   const file = stateDatabasePath(config);
@@ -585,6 +622,7 @@ export {
   initializeStateDatabase,
   maintainStateDatabase,
   openStateDatabase,
+  retryStateDatabaseBusy,
   setStateMeta,
   stateDatabaseBackupPath,
   stateDatabasePath,

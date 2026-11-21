@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
+import { once } from 'node:events';
+import { Worker } from 'node:worker_threads';
 import { openStateDatabase } from '../src/stateDatabase.ts';
 import os from 'node:os';
 import path from 'node:path';
@@ -13,6 +15,7 @@ import { getToolActivity, resetToolActivity } from '../src/toolActivity.js';
 import { flushTaskHistoryPersistence, readTaskHistorySession } from '../src/taskHistoryStore.ts';
 import { resetTaskHistoryCaches } from '../src/taskHistoryStorage.ts';
 import { readTaskIntegrity } from '../src/taskIntegrity.ts';
+import { applyTaskProgressPatch } from '../src/tools/taskProgress.js';
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-task-plan-'));
 const previousConfig = process.env.REL_AI_MCP_CONFIG;
@@ -250,6 +253,44 @@ try {
   const persistedFinal = readTaskHistorySession(config, started.work_id);
   assert.equal(persistedFinal?.plan?.revision, 6);
   assert.ok(persistedFinal?.plan?.steps?.length > 0);
+
+  // A different writer may hold the same database even after this task's
+  // pending history is drained. Release it from a service timer so a
+  // synchronous busy wait cannot pass this test.
+  const writer = new Worker(`
+    const { parentPort, workerData } = require('node:worker_threads');
+    const { DatabaseSync } = require('node:sqlite');
+    const db = new DatabaseSync(workerData);
+    db.exec('BEGIN IMMEDIATE');
+    parentPort.postMessage('locked');
+    parentPort.once('message', () => { db.exec('ROLLBACK'); db.close(); });
+  `, { eval: true, execArgv: [], workerData: path.join(stateDir, 'durable-state.sqlite') });
+  try {
+    assert.deepEqual(await once(writer, 'message', { signal: AbortSignal.timeout(5000) }), ['locked']);
+    const controller = new AbortController();
+    const abortReason = new Error('Stop retrying a busy plan save');
+    const publications = [];
+    const apply = options => applyTaskProgressPatch(config, projectless.work_id,
+      { id: 'inspect', status: 'completed' }, data => publications.push(data.plan), options);
+    const abortTimer = setTimeout(() => controller.abort(abortReason), 40);
+    try {
+      await assert.rejects(apply({ signal: controller.signal }), error => error === abortReason);
+      assert.deepEqual(publications, [], 'abort must not publish a revision');
+    } finally {
+      clearTimeout(abortTimer);
+    }
+    const release = setTimeout(() => writer.postMessage('release'), 60);
+    try {
+      const saved = await apply({});
+      assert.equal(saved.plan.revision, projectless.plan.revision + 1);
+      assert.deepEqual(publications, [saved.plan], 'a transient lock must publish only the committed revision');
+      assert.deepEqual(readTaskHistorySession(config, projectless.work_id).plan, saved.plan);
+    } finally {
+      clearTimeout(release);
+    }
+  } finally {
+    await writer.terminate();
+  }
 } finally {
   await flushAuditWrites().catch(() => {});
   await flushTaskHistoryPersistence().catch(() => {});

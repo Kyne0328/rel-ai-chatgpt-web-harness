@@ -1,11 +1,11 @@
 import * as path from 'node:path';
-import { setTimeout as delay } from 'node:timers/promises';
 import { runProcess, summarizeCommand } from '../process.js';
 import { outputSpillOwner } from '../outputSpill.js';
 import { selectValidationLevel } from '../validationStrategy.js';
 import { resolvePolicy } from '../policyResolver.js';
 import { getCurrentTaskAbortSignal, getCurrentToolActivityContext } from '../toolActivity.js';
 import { readTaskIntegrity, readWorkspaceIntegrity, taskOwnedChangedFiles } from '../taskIntegrity.ts';
+import { retryStateDatabaseBusy } from '../stateDatabase.ts';
 import { readRecentWorkflowEvidence, recordWorkflowEvidenceBatch } from '../taskHistoryStore.ts';
 import { buildWorkflowEvidenceReceipt, checkEvidenceReusable } from '../workflow/evidence.js';
 import { sanitizeDisplayText } from '../taskObservability.js';
@@ -32,37 +32,6 @@ import {
 
 const CHECK_OUTPUT_TAIL_DEFAULT = 4000;
 const CHECK_OUTPUT_TAIL_FULL = 40000;
-
-async function resolveValidationPolicy(workspace, config, context, signal) {
-  // SQLite access stays fail-fast on the service thread. Only this pre-execution
-  // policy read may yield briefly while another connection finishes its work.
-  const contextDeadline = Number(context?.deadlineAtMs);
-  const hasDeadline = Number.isFinite(contextDeadline) && contextDeadline > 0;
-  const budgetMs = hasDeadline ? Math.min(1000, Math.max(0, contextDeadline - Date.now())) : 1000;
-  const retryDeadline = performance.now() + budgetMs;
-  let busyError;
-  while (true) {
-    signal?.throwIfAborted();
-    if (hasDeadline && Date.now() >= contextDeadline) {
-      throw new DOMException('Validation policy deadline expired.', 'TimeoutError');
-    }
-    if (busyError && performance.now() >= retryDeadline) throw busyError;
-    try {
-      return resolvePolicy(workspace, config);
-    } catch (error) {
-      if (error?.errcode !== 5 && error?.code !== 'SQLITE_BUSY') throw error;
-      busyError = error;
-    }
-    const remainingMs = retryDeadline - performance.now();
-    if (remainingMs <= 0) continue;
-    try {
-      await delay(Math.min(20, remainingMs), undefined, { signal });
-    } catch (error) {
-      signal?.throwIfAborted();
-      throw error;
-    }
-  }
-}
 
 async function relaiVerify(workspace, config, args = {}, context = {}) {
   const completionRetryCount = Math.max(0, Number(context.completionRetryCount || 0));
@@ -127,7 +96,8 @@ async function relaiVerify(workspace, config, args = {}, context = {}) {
   const normalized = normalizeVerifyChecks(effectiveArgs, workspace.path, level);
   const { checks, checkUnits, skippedChecks, aliasNormalizations } = normalized;
   const { level: validationLevel, reason: validationLevelReason, changedFiles } = selectValidationLevel(workspace.path, workspace, args.validationLevel, validationScope);
-  const policy = await resolveValidationPolicy(workspace, config, context, signal);
+  const retryOptions = { signal, deadlineAtMs: Number(context.deadlineAtMs) };
+  const policy = await retryStateDatabaseBusy(() => resolvePolicy(workspace, config), retryOptions);
 
   if (checks.length === 0) {
     return noChecksValidationResult(workspace, config, {
@@ -143,7 +113,9 @@ async function relaiVerify(workspace, config, args = {}, context = {}) {
   if (!currentFingerprint) currentFingerprint = await createValidationFingerprint(workspace, config, { paths: fingerprintScope, signal });
   const recentEvidence = currentTaskId ? readRecentWorkflowEvidence(config, currentTaskId, 100) : [];
   const evidenceAuthority = currentTaskId ? (requestIntegrity || readTaskIntegrity(config, currentTaskId, logicalWorkspaceAlias)) : null;
-  const evidenceWorkspace = currentTaskId ? readWorkspaceIntegrity(config, logicalWorkspaceAlias) : null;
+  const readEvidenceWorkspace = () => retryStateDatabaseBusy(
+    () => readWorkspaceIntegrity(config, logicalWorkspaceAlias, { timeoutMs: 0 }), retryOptions);
+  const evidenceWorkspace = currentTaskId ? await readEvidenceWorkspace() : null;
   const evidenceReceipts = new Array(checks.length);
   const reusedCheckIds = new Array(checks.length);
   let executedUnits = 0;
@@ -178,7 +150,7 @@ async function relaiVerify(workspace, config, args = {}, context = {}) {
           });
           if (recentEvidence.length) {
             const reuseAuthority = readTaskIntegrity(config, currentTaskId, logicalWorkspaceAlias);
-            const reuseWorkspace = readWorkspaceIntegrity(config, logicalWorkspaceAlias);
+            const reuseWorkspace = await readEvidenceWorkspace();
             reusable = recentEvidence.find(receipt => checkEvidenceReusable(receipt, {
               commandId,
               command,

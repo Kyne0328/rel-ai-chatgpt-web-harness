@@ -1,10 +1,16 @@
 import { getToolActivity, updateCurrentToolActivity } from '../toolActivity.js';
 import { normalizeTaskPlan } from '../taskObservability.js';
 import { recordTaskActivityEvent, withTaskHistoryPersistenceBarrier } from '../taskHistoryStore.ts';
+import { retryStateDatabaseBusy } from '../stateDatabase.ts';
 
 async function applyTaskProgressPatch(config, taskId, patch = {}, update = updateCurrentToolActivity, options = {}) {
   try {
-    return await withTaskHistoryPersistenceBarrier(config, taskId, () => commitTaskProgressPatch(config, taskId, patch, update), options);
+    // Other tasks' history writes share the same database. Re-enter the
+    // barrier and recompute the plan on retry, before any in-memory publication.
+    return await retryStateDatabaseBusy(
+      () => withTaskHistoryPersistenceBarrier(config, taskId, () => commitTaskProgressPatch(config, taskId, patch, update), options),
+      { ...options, shouldRetry: error => error?.code === 'TASK_PLAN_PERSISTENCE_FAILED' }
+    );
   } catch (error) {
     if (error?.code === 'FALLBACK_PERSISTENCE_FAILED') throw planPersistenceError(error);
     throw error;

@@ -6,6 +6,7 @@ import { mock } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { installForcedLowHostMemory } from './helpers/forced-low-host-memory.mjs';
 import { startMcpClient } from './helpers/mcp-client.mjs';
+import { resolveWorkspace } from '../src/config.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-context-pressure-'));
@@ -27,10 +28,11 @@ async function settledByNextTurn(pending, message) {
 
 function fixture(name, cached = false) {
   const directory = path.join(temp, name);
-  const workspace = { alias: 'fixture', path: path.join(directory, 'repo') };
-  fs.mkdirSync(workspace.path, { recursive: true });
-  fs.writeFileSync(path.join(workspace.path, 'index.js'), 'export const value = 1;\n');
-  const config = { version: 3, stateDir: path.join(directory, 'state'), auditLogPath: path.join(directory, 'state', 'audit.jsonl'), workspaces: { fixture: { path: workspace.path, commands: {} } } };
+  const workspacePath = path.join(directory, 'repo');
+  fs.mkdirSync(workspacePath, { recursive: true });
+  fs.writeFileSync(path.join(workspacePath, 'index.js'), 'export const value = 1;\n');
+  const config = { version: 3, stateDir: path.join(directory, 'state'), auditLogPath: path.join(directory, 'state', 'audit.jsonl'), workspaces: { fixture: { path: workspacePath, commands: {} } } };
+  const workspace = resolveWorkspace(config, 'fixture');
   if (cached) {
     const db = openIndexDatabase(repositoryIndexPath(config, workspace));
     ensureIndexSchema(db);
