@@ -87,10 +87,6 @@ function resolveTopology(workspacePath: string, topology?: RepositoryTopology): 
   return topology ?? discoverRepositoryTopology(workspacePath) as RepositoryTopology;
 }
 
-function discoveryManifestSignature(workspacePath: unknown): unknown {
-  return resolveTopology(String(workspacePath || '')).fingerprint;
-}
-
 function cacheDiscovery(root: string, signature: unknown, value: DiscoveredCommands, warnings: readonly DiscoveryWarning[]): void {
   if (discoveryCache.size >= DISCOVERY_CACHE_LIMIT && !discoveryCache.has(root)) {
     const oldestKey = discoveryCache.keys().next().value as string | undefined;
@@ -145,4 +141,4 @@ function projectNestedPackageCommands(discovered: DiscoveredCommands, topology: 
   }
 }
 
-export { commandDiscoveryWarnings, discoverCommands, discoveryManifestSignature };
+export { commandDiscoveryWarnings, discoverCommands };
