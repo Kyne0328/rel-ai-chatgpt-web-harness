@@ -104,6 +104,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm run test:pty
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # The isolated launcher runs test/windows-bookkeeping-ownership-unit.mjs with desktop-like file ownership.
           pwsh -NoLogo -NoProfile -NonInteractive -File test/windows-bookkeeping-ownership-runner.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $env:RELAI_NATIVE_APP_CAPTURE_FIXTURE = '1'
